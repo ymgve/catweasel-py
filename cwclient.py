@@ -43,6 +43,7 @@ else:
 assumed_tps = -1
 highest_with_data = 0
 target_retry = 10
+prevblockdata = None
 
 allknown = {}
 for trackno in range(168):
@@ -64,11 +65,19 @@ for trackno in range(168):
         else:
             timeout = 500
         
-        sc.sendall(b"\x01" + struct.pack("<BBBBBII", track_seek, track, side, clock, mode, flags, timeout))
+        while True:
+            sc.sendall(b"\x01" + struct.pack("<BBBBBII", track_seek, track, side, clock, mode, flags, timeout))
 
-        blocksize = recv_all(sc, 4)
-        blocksize, = struct.unpack("<I", blocksize)
-        blockdata = recv_all(sc, blocksize)
+            blocksize = recv_all(sc, 4)
+            blocksize, = struct.unpack("<I", blocksize)
+            blockdata = recv_all(sc, blocksize)
+            
+            if prevblockdata == blockdata:
+                print("Exact raw data repeated, assuming some catweasel error")
+            else:
+                prevblockdata = blockdata
+                break
+                
         trackheader = struct.pack("<BBBBI", trackmagic, trackno, clock, HEADER_FLAG_INDEX_STORED, blocksize)
         of.write(trackheader + blockdata)
 

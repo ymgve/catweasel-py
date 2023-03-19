@@ -159,7 +159,7 @@ class TrackDecoder(object):
         byte, missync = getbyte(self.bs)
         
         if byte != 0xfc or missync != 0:
-            self.debug(2, "found DOS gap header but bad gap data %02x,  bit missyncs %d" % (byte, missync))
+            self.debug(2, "found DOS gap header but bad gap data %r,  bit missyncs %d" % (byte, missync))
             return
             
         self.last_found = "dos_gapsync"
@@ -178,7 +178,7 @@ class TrackDecoder(object):
             return
             
         if byte not in (0xfb, 0xfe):
-            self.debug(2, "wrong DOS header type byte %02x" % byte)
+            self.debug(2, "wrong DOS header type byte %r" % byte)
             return
             
         self.debug(3, "found DOS header type %02x" % byte)
@@ -424,9 +424,20 @@ if __name__ == "__main__":
                 known_sectors[ts] = new_sectors[sectorno]
             else:
                 if known_sectors[ts] != new_sectors[sectorno]:
-                    print("\n\n\n!!!!!!SECTOR MISMATCH\n\n\n", trackno, sectorno)
+                    sector_a = known_sectors[ts]
+                    sector_b = new_sectors[sectorno]
+                    diff = ""
+                    for i in range(512):
+                        if sector_a[i] != sector_b[i]:
+                            diff += "XX"
+                        else:
+                            diff += ".."
+                            
+                    print("\n\n\n!!!!!!SECTOR MISMATCH track %d sector %d" % (trackno, sectorno))
+                    for i in range(0, 512, 32):
+                        print(sector_a[i:i+32].hex(), sector_b[i:i+32].hex(), diff[i*2:i*2+64])
+                    print("")
         
-        #print(len(known_sectors))
 
     of2 = open("_dummy.img", "wb")
     for trackno in range(160):
@@ -439,4 +450,3 @@ if __name__ == "__main__":
                 of2.write(b"CWTOOLBADSECTOR!" * 32)
 
     of2.close()
-        

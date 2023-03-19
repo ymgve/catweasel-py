@@ -262,7 +262,7 @@ if __name__ == "__main__":
             raise Exception()
         trackdata = f.read(tsize)
         
-        #open("tracks\\trackdata%03d.bin" % trackno, "wb").write(trackdata)
+        open("temptracks\\trackdata%03d.bin" % trackno, "wb").write(trackdata)
         
         # if trackno != 25:
             # continue

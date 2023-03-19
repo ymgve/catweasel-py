@@ -1,4 +1,4 @@
-import array, fcntl, struct, ctypes, os, socket
+import array, fcntl, struct, ctypes, os, socket, time
 
 _IOC_WRITE = 1
 _IOC_READ = 2
@@ -64,12 +64,24 @@ while True:
             arr = struct.pack("<IBBBBBxxxIIxxxxQIxxxx", CW_STRUCT_VERSION, track_seek, track, side, clock, mode, flags, timeout, ctypes.addressof(buff), BUFFERSIZE)
 
             # gotta pass a bytearray to get the proper return value
-            res = fcntl.ioctl(iof, CW_IOC_READ, bytearray(arr))
+            while True:
+                try:
+                    res = fcntl.ioctl(iof, CW_IOC_READ, bytearray(arr))
+                    break
+                except Exception as e:
+                    print("IO call failed, trying again", e)
+                    msg = b"IO call failed, trying again"
+                    cs.sendall(b"\x00" + struct.pack("<I", len(msg)) + msg)
+                    iof.close()
+                    
+                    time.sleep(1)
+                    iof = os.open("/dev/cw0raw0", os.O_RDWR)
+                
             if res < 0 or res > BUFFERSIZE:
                 raise Exception("BAD RETURN CODE %d" % res)
                 
             try:
-                cs.sendall(struct.pack("<I", res) + buff[0:res])
+                cs.sendall(b"\x01" + struct.pack("<I", res) + buff[0:res])
             except Exception as e:
                 print("Connection error:", e)
                 cs.close()

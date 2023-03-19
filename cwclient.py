@@ -68,9 +68,24 @@ for trackno in range(168):
         while True:
             sc.sendall(b"\x01" + struct.pack("<BBBBBII", track_seek, track, side, clock, mode, flags, timeout))
 
-            blocksize = recv_all(sc, 4)
-            blocksize, = struct.unpack("<I", blocksize)
-            blockdata = recv_all(sc, blocksize)
+            while True:
+                cmd = recv_all(sc, 1)
+                
+                if cmd == b"\x00":
+                    msgsize = recv_all(sc, 4)
+                    msgsize, = struct.unpack("<I", msgsize)
+                    msg = recv_all(sc, msgsize)
+                    print(repr(msg))
+                    
+                elif cmd == b"\x01":
+                    blocksize = recv_all(sc, 4)
+                    blocksize, = struct.unpack("<I", blocksize)
+                    blockdata = recv_all(sc, blocksize)
+                    
+                    break
+                    
+                else:
+                    raise Exception("Strange command", cmd)
             
             if prevblockdata == blockdata:
                 print("Exact raw data repeated, assuming some catweasel error")

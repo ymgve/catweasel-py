@@ -48,8 +48,11 @@ class Bitstream(object):
         return self.last
     
     def push_back(self, nbits, value):
-        self.pending <<= nbits
-        self.pending |= value
+        for i in range(nbits):
+            self.pending <<= 1
+            self.pending |= value & 1
+            value >>= 1
+            
         self.bitindex -= nbits
         
         
@@ -333,7 +336,8 @@ class TrackDecoder(object):
             csum ^= rawres
             
         if total_missing != 0:
-            self.debug(2, "bit missyncs in Amiga header %d" % total_missing)
+            self.debug(2, "bit missyncs in Amiga data %d" % total_missing)
+            return
             
         csum &= 0x55555555
         if csum != 0:
@@ -393,7 +397,7 @@ if __name__ == "__main__":
         raise Exception("bad magic")
         
     td = TrackDecoder()
-    td.setdebug(2)
+    td.setdebug(1)
     
     while True:
         trackoffset = f.tell()
@@ -411,7 +415,7 @@ if __name__ == "__main__":
         # if trackno != 25:
             # continue
             
-        print("------------- track number %d file offset %x" % (trackno, trackoffset))
+        print("------------- track number %d file offset %x good sectors %d" % (trackno, trackoffset, len(known_sectors)))
         
         tracktype, new_sectors = td.parse_mfm(trackdata, trackno)
         for sectorno in new_sectors:
@@ -420,7 +424,7 @@ if __name__ == "__main__":
                 known_sectors[ts] = new_sectors[sectorno]
             else:
                 if known_sectors[ts] != new_sectors[sectorno]:
-                    print("SECTOR MISMATCH", trackno, sectorno)
+                    print("\n\n\n!!!!!!SECTOR MISMATCH\n\n\n", trackno, sectorno)
         
         #print(len(known_sectors))
 

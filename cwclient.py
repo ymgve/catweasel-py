@@ -40,10 +40,14 @@ if not os.path.isfile(filename):
 else:
     of = open(filename, "ab")
 
-assumed_tps = -1
+assumed_highest = -1
 highest_with_data = 0
 target_retry = 10
 prevblockdata = None
+
+td = rawparser.TrackDecoder()
+td.setdebug(1)
+tracktypecounts = {}
 
 allknown = {}
 for trackno in range(168):
@@ -96,33 +100,34 @@ for trackno in range(168):
         trackheader = struct.pack("<BBBBI", trackmagic, trackno, clock, HEADER_FLAG_INDEX_STORED, blocksize)
         of.write(trackheader + blockdata)
 
-        new_sectors = rawparser.try_parse_mfm(blockdata)
-        for sector_header in new_sectors:
-            cyl, side, sectorno, sz = sector_header
-            if trackno != cyl * 2 + side:
-                print("Sector on wrong track!", trackno, cyl * 2 + side, sectorno)
+        tracktype, new_sectors = td.parse_mfm(blockdata, trackno)
+        
+        if tracktype not in tracktypecounts:
+            tracktypecounts[tracktype] = 0
+        tracktypecounts[tracktype] += 1
+            
+        for sectorno in new_sectors:
+            highest_sector = max(highest_sector, sectorno)
+            if sectorno not in known_sectors:
+                known_sectors[sectorno] = new_sectors[sectorno]
             else:
-                highest_sector = max(highest_sector, sectorno)
-                if sectorno not in known_sectors:
-                    known_sectors[sectorno] = new_sectors[sector_header]
-                else:
-                    if known_sectors[sectorno] != new_sectors[sector_header]:
-                        print("SECTOR MISMATCH", trackno, sector_header)
+                if known_sectors[sectorno] != new_sectors[sectorno]:
+                    print("SECTOR MISMATCH", trackno, sectorno)
                     
-        if assumed_tps < highest_sector:
-            assumed_tps = highest_sector
+        if assumed_highest < highest_sector:
+            assumed_highest = highest_sector
             
         sectormap = ""
-        if assumed_tps != -1:
-            for i in range(assumed_tps):
-                if i + 1 in known_sectors:
+        if assumed_highest != -1:
+            for i in range(assumed_highest+1):
+                if i in known_sectors:
                     sectormap += "@ "
                 else:
                     sectormap += ". "
                     
-        print("Track %3d try %2d: %5x bytes, %2d/%2d sectors  %s" % (trackno, retry, blocksize, len(known_sectors), assumed_tps, sectormap))
+        print("Track %3d try %2d: %5x bytes, %2d/%2d sectors  %s  track type %s" % (trackno, retry, blocksize, len(known_sectors), assumed_highest + 1, sectormap, tracktype))
         
-        if len(known_sectors) == assumed_tps:
+        if len(known_sectors) == assumed_highest + 1:
             break
                 
         if len(known_sectors) == 0:
@@ -145,15 +150,16 @@ numtracks = highest_with_data + 1
 
 of2 = open(filename + ".img", "wb")
 for trackno in range(numtracks):
-    for sectorno in range(1, assumed_tps + 1):
+    for sectorno in range(assumed_highest + 1):
         if sectorno in allknown[trackno]:
             of2.write(allknown[trackno][sectorno])
             goodcount += 1
         else:
             of2.write(b"CWTOOLBADSECTOR!" * 32)
-            badsectors.append((trackno, sectorno-1))
+            badsectors.append((trackno, sectorno))
 of2.close()
 
+print("track type stats", tracktypecounts)
 print("%3d (%3d) tracks read (sectors: good %4d  bad %4d)" % (numtracks, numtracks // 2, goodcount, len(badsectors)))
 for trackno in range(numtracks):
     s = ""

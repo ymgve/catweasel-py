@@ -22,6 +22,7 @@ class Bitstream(object):
         self.trackdata = trackdata
         self.index = 0
         self.pending = 0
+        self.bitindex = 0
         
     def get_bit(self):
         if self.pending == 0:
@@ -41,8 +42,17 @@ class Bitstream(object):
             
         self.last = self.pending & 1
         self.pending >>= 1
+        
+        self.bitindex += 1
+        
         return self.last
     
+    def push_back(self, nbits, value):
+        self.pending <<= nbits
+        self.pending |= value
+        self.bitindex -= nbits
+        
+        
 def getbyte(bs):
     res = 0
     missing_syncs = 0
@@ -76,6 +86,35 @@ def getbyte(bs):
         
     return res, missing_syncs
            
+def getamigaword(bs):
+    rawres = 0
+    missing_syncs = 0
+    for i in range(16):
+        last = bs.last
+        a = bs.get_bit()
+        b = bs.get_bit()
+        if a == None or b == None:
+            return None, missing_syncs
+            
+        s = a * 2 + b
+        rawres = (rawres << 2) | s
+        
+        if s == 1:
+            pass
+            
+        elif s == 0:
+            if last == 0:
+                missing_syncs += 1
+            
+        elif s == 2:
+            if last == 1:
+                missing_syncs += 1
+            
+        else:
+            raise Exception("DSDDS")
+            
+    return rawres, missing_syncs
+        
 def getbytes(bs, count):
     totalmiss = 0
     res = bytearray()
@@ -89,158 +128,261 @@ def getbytes(bs, count):
         
     return res, totalmiss
         
-def parse_gap(bs):
-    # byte, missync = getbyte(bs)
-    # print hex(byte), missync
-    # if byte != 0xc2 or missync != 1:
-        # raise Exception("Bad gap")
-
-    # byte, missync = getbyte(bs)
-    # print hex(byte), missync
-    # if byte != 0xc2 or missync != 1:
-        # raise Exception("Bad gap")
+class TrackDecoder(object):
+    def __init__(self):
+        self.debuglevel = 0
         
-    byte, missync = getbyte(bs)
-    #print hex(byte), missync
-    if byte != 0xfc or missync != 0:
-        return False
+    def setdebug(self, level):
+        self.debuglevel = level
         
-    return True
-        
-def parse_head(bs, sectorsize, curr_header):
-    byte, missync = getbyte(bs)
-    if missync != 0:
-        return None
-        
-    if byte not in (0xfb, 0xfe):
-        return None
-        
-    if byte == 0xfe:
-        res, missync = getbytes(bs, 6)
-        if missync != 0:
-            #print("missyncs in weird place!!")
-            pass
-        
-        if len(res) != 6:
-            return None
-            
-        crc = crc16(b"\xa1\xa1\xa1\xfe" + res)
-        if crc != 0:
-            #print("bad header CRC")
-            return None
-            
-        cyl, side, sec, sz = struct.unpack("<BBBB", res[0:4])
-        return ("header", cyl, side, sec, sz)
-        
-    elif byte == 0xfb:
-        if curr_header != None and curr_header[2] == 11 and sectorsize != 512:
-            print("SKIPPING STRANGE TRAILING SECTOR")
-            return None
-            
-        res, missync = getbytes(bs, sectorsize + 2)
-        if missync != 0:
-            #print("missyncs in weird place!!")
-            pass
-        
-        if len(res) != sectorsize + 2:
-            return None
-            
-        crc = crc16(b"\xa1\xa1\xa1\xfb" + res)
-        if crc != 0:
-            #print("bad data CRC")
-            return None
-            
-        return ("data", res[0:sectorsize])
-
-    
-def try_parse_mfm(trackdata):
-
-    known_sectors = {}
-    curr_header = None
-    bits_since_header = 0
-    known_cylside = None
-    sectorsize = 512
-    
-    bs = Bitstream(trackdata)
-    
-    buffer = []
-    check = 0
-    while True:
-        bit = bs.get_bit()
-        if bit == None:
-            break
-            
-        buffer.append(bit)
-        check = (check << 1) | bit
-        check &= 0xffffffffffff
-
-        bits_since_header += 1
-        
-        if check == 0x522452245224:
-            res = parse_gap(bs)
-            if res != None:
-                # print "FOUND GAP"
-                # print "extra data size", len(buffer)
-                buffer = []
-                curr_header = None
-            
-        if check == 0x448944894489:
-            # print "FOUND HEAD"
-            # print "extra data size", len(buffer)
+    def debug(self, level, *msg):
+        if level <= self.debuglevel:
+            print("%2d %10d" % (level, self.bs.bitindex), *msg)
+       
+    def update_known_sectors(self, sectorno, data):
+        if sectorno not in self.known_sectors:
+            self.known_sectors[sectorno] = data
+        else:
+            if self.known_sectors[sectorno] != data:
+                self.debug(0, "mismatch between sector data at sector %d" % sectorno)
                 
-            res = parse_head(bs, sectorsize, curr_header)
-            if res != None:
-                buffersize = len(buffer)
-                buffer = []
-                if res[0] == "header":
-                    if curr_header != None:
-                        #print("Reached another header before data!")
-                        pass
-                        
-                    cyl, side, sec, sz = res[1:]
-                    #print("found sector header cyl %d side %d sec %d" % (cyl, side, sec))
-                    cylside = (cyl, side)
-                    if sz not in (1, 2):
-                        raise Exception("bad sector size! %d" % sz)
-                        
-                    sectorsize2 = 1 << (7+sz)
-                    if sectorsize != sectorsize2:
-                        print("Changing sector size from %d to %d for sector %d" % (sectorsize, sectorsize2, sec))
-                        sectorsize = sectorsize2
-                        
-                    if known_cylside == None:
-                        known_cylside = cylside
-                    else:
-                        if known_cylside != cylside:
-                            print("sector header at wrong track", known_cylside, cylside, sec)
-                            
-                    curr_header = (cyl, side, sec, sz)
-                    bits_since_header = 0
-                    
-                elif res[0] == "data":
-                    if bits_since_header > 1500 and curr_header != None:
-                        print("unusual many bits since header, ignoring data as it might belong to another header", bits_since_header, curr_header)
-                        curr_header = None
-                    
-                        
-                    if curr_header is None:
-                        #print("sector data with no header")
-                        pass
-                    else:
-                        if curr_header in known_sectors:
-                            if known_sectors[curr_header] != res[1]:
-                                print("DATA MISMATCH")
-                                
-                        else:
-                            known_sectors[curr_header] = res[1]
-                            #print("OK data for sector", curr_header, hashlib.sha256(res[1]).hexdigest()[0:16])
-                            # for ii in range(16):
-                                # print(res[1][ii*32:ii*32+32].hex())
-                            
-                        curr_header = None
-            #exit()
+    def parse_dos_gap(self):
+        self.debug(3, "found DOS gap")
         
-    return known_sectors
+        if self.tracktype not in ("unknown", "dos"):
+            self.debug(0, "found DOS gap on non-DOS disk")
+            return
+            
+        byte, missync = getbyte(self.bs)
+        
+        if byte != 0xfc or missync != 0:
+            self.debug(2, "found DOS gap header but bad gap data %02x,  bit missyncs %d" % (byte, missync))
+            return
+            
+        self.last_found = "dos_gapsync"
+            
+    def parse_dos_header(self):
+        self.debug(3, "found DOS header")
+        
+        if self.tracktype not in ("unknown", "dos"):
+            self.debug(0, "found DOS header on non-DOS disk")
+            return
+        
+        byte, missync = getbyte(self.bs)
+        
+        if missync != 0:
+            self.debug(2, "bit missyncs in DOS header type byte %d" % missync)
+            return
+            
+        if byte not in (0xfb, 0xfe):
+            self.debug(2, "wrong DOS header type byte %02x" % byte)
+            return
+            
+        self.debug(3, "found DOS header type %02x" % byte)
+        
+        if byte == 0xfe:
+            res, missync = getbytes(self.bs, 6)
+            if missync != 0:
+                self.debug(2, "bit missyncs in DOS header data %d" % missync)
+                return
+            
+            if len(res) != 6:
+                self.debug(3, "incomplete DOS header, probably at end of track scan")
+                return
+                
+            crc = crc16(b"\xa1\xa1\xa1\xfe" + res)
+            if crc != 0:
+                self.debug(2, "bad DOS header CRC")
+                return
+                
+            # the header is now CRC verified and subsequent oddities should be level 0 or 1 warnings
+            cyl, side, sectorno, sectorsizebits = struct.unpack("<BBBB", res[0:4])
+            
+            if side not in (0, 1):
+                self.debug(0, "invalid side in DOS header: %d" % side)
+                return
+            
+            trackno = cyl * 2 + side
+            if trackno != self.target_track:
+                self.debug(0, "wrong track number in DOS header, is %d but should be %d" % (trackno, self.target_track))
+                return
+                
+            sectorno -= 1 # DOS sector numbers start at 1, we adjust to 0-indexed
+            
+            if sectorno < 0 or sectorno > 30: # upper limit dumb number picked at random
+                self.debug(0, "wrong sector number in DOS header, %d" % sectorno)
+                return
+            
+            new_sectorsize = 1 << (7+sectorsizebits)
+            if self.sectorsize == None:
+                self.sectorsize = new_sectorsize
+                if new_sectorsize != 512:
+                    self.debug(1, "non-standard sector size of %d" % new_sectorsize)
+            else:
+                if self.sectorsize != new_sectorsize:
+                    self.debug(0, "sector size changes during track, ignoring this header")
+                    return
+            
+            self.debug(3, "got valid sector header track %d sector %d" % (trackno, sectorno))
+            
+            if self.last_found == "dos_header_valid":
+                self.debug(2, "encountered another sector header before data, prev header %d curr header %d" % (self.last_header, sectorno))
+                
+            self.header_bitindex = self.bs.bitindex
+            
+            self.last_found = "dos_header_valid"
+            self.last_header = sectorno
+            
+            self.tracktype = "dos"
+            
+        elif byte == 0xfb:
+            if self.last_found != "dos_header_valid":
+                self.debug(2, "DOS data block with no header, probably at start of track scan")
+                return
+                
+            sectorno = self.last_header
+            self.debug(3, "found data block for sector header %d" % sectorno)
+            
+            distance_to_header = self.bs.bitindex - self.header_bitindex
+            
+            if distance_to_header > 1500:
+                self.debug(0, "unusually many bits since header, ignoring data as it might belong to another header", distance_to_header, self.last_header)
+                return
+                
+            res, missync = getbytes(self.bs, self.sectorsize + 2)
+            if missync != 0:
+                self.debug(2, "bit missyncs in DOS sector data %d" % missync)
+                return
+            
+            if len(res) != self.sectorsize + 2:
+                self.debug(3, "incomplete DOS data, probably at end of track scan")
+                return
+                
+            crc = crc16(b"\xa1\xa1\xa1\xfb" + res)
+            if crc != 0:
+                self.debug(2, "bad DOS data CRC")
+                return
+                
+            self.update_known_sectors(sectorno, res[0:-2])
+            
+            self.last_found = "dos_data"
+
+            self.tracktype = "dos"
+
+    def parse_amiga_sector(self):
+        self.debug(3, "found Amiga header")
+        
+        if self.tracktype not in ("unknown", "amiga"):
+            self.debug(2, "found Amiga header on non-Amiga disk, probably false positive")
+            return
+        
+        words = []
+        total_missing = 0
+        csum = 0
+        for i in range(12):
+            rawres, missing_syncs = getamigaword(self.bs)
+            if rawres == None:
+                self.debug(3, "ran out of Amiga data, probably at end of track")
+                return
+                
+            words.append(rawres)
+            total_missing += missing_syncs
+            csum ^= rawres
+            
+        if total_missing != 0:
+            self.debug(2, "bit missyncs in Amiga header %d" % total_missing)
+            return
+            
+        csum &= 0x55555555
+        if csum != 0:
+            self.debug(2, "bad Amiga header checksum")
+            return
+            
+        header = ((words[0] & 0x55555555) << 1) | (words[1] & 0x55555555)
+        
+        format_id = header >> 24
+        trackno = (header >> 16) & 0xff
+        sectorno = (header >> 8) & 0xff
+        until_end = header & 0xff
+        
+        if format_id != 0xff:
+            self.debug(2, "wrong format ID in Amiga header %02x" % format_id)
+            
+        if trackno != self.target_track:
+            self.debug(0, "wrong track number in Amiga header, is %d but should be %d" % (trackno, self.target_track))
+            return
+            
+        if sectorno < 0 or sectorno > 30: # upper limit dumb number picked at random
+            self.debug(0, "wrong sector number in Amiga header, %d" % sectorno)
+            return
+        
+        self.debug(3, "got valid sector header track %d sector %d" % (trackno, sectorno))
+        
+        csum = 0
+        words = []
+        total_missing = 0
+        csum = 0
+        for i in range(258):
+            rawres, missing_syncs = getamigaword(self.bs)
+            if rawres == None:
+                self.debug(3, "ran out of Amiga data, probably at end of track")
+                return
+                
+            words.append(rawres)
+            total_missing += missing_syncs
+            csum ^= rawres
+            
+        if total_missing != 0:
+            self.debug(2, "bit missyncs in Amiga header %d" % total_missing)
+            
+        csum &= 0x55555555
+        if csum != 0:
+            self.debug(2, "bad Amiga data checksum")
+            return
+            
+        data = b""
+        for i in range(128):
+            dataword = ((words[i+2] & 0x55555555) << 1) | (words[i+130] & 0x55555555)
+            data += struct.pack(">I", dataword)
+            
+        self.update_known_sectors(sectorno, data)
+        
+        self.last_found = "amiga_data"
+        
+        self.tracktype = "amiga"
+    
+    def parse_mfm(self, trackdata, target_track):
+        self.target_track = target_track
+        self.sectorsize = None
+        self.bits_since_header = 0
+        self.tracktype = "unknown"
+        self.last_found = "nothing"
+        self.known_sectors = {}
+        self.bs = Bitstream(trackdata)
+        
+        check = 0
+        while True:
+            bit = self.bs.get_bit()
+            if bit == None:
+                break
+                
+            check = (check << 1) | bit
+            check &= 0xffffffffffff
+
+            if check == 0x522452245224:
+                self.parse_dos_gap()
+                check = 0
+                
+            elif check & 0xffffffff0000 == 0x448944890000:
+                if check == 0x448944894489:
+                    self.parse_dos_header()
+                else:
+                    self.bs.push_back(16, check & 0xffff)
+                    self.parse_amiga_sector()
+                
+                check = 0
+                
+        return self.tracktype, self.known_sectors
     
 if __name__ == "__main__":
     known_sectors = {}
@@ -250,7 +392,9 @@ if __name__ == "__main__":
     if magic != b"cwtool raw data 3".ljust(32, b"\x00"):
         raise Exception("bad magic")
         
-        
+    td = TrackDecoder()
+    td.setdebug(2)
+    
     while True:
         trackoffset = f.tell()
         trackheader = f.read(8)
@@ -269,20 +413,26 @@ if __name__ == "__main__":
             
         print("------------- track number %d file offset %x" % (trackno, trackoffset))
         
-        new_sectors = try_parse_mfm(trackdata)
-        for sector_header in new_sectors:
-            cyl, side, sectorno, sz = sector_header
-            if trackno != cyl * 2 + side:
-                print("Sector on wrong track!", trackno, cyl * 2 + side, sectorno)
+        tracktype, new_sectors = td.parse_mfm(trackdata, trackno)
+        for sectorno in new_sectors:
+            ts = (trackno, sectorno)
+            if ts not in known_sectors:
+                known_sectors[ts] = new_sectors[sectorno]
             else:
-                ts = (trackno, sectorno)
-                if ts not in known_sectors:
-                    known_sectors[ts] = new_sectors[sector_header]
-                else:
-                    if known_sectors[ts] != new_sectors[sector_header]:
-                        print("SECTOR MISMATCH", trackno, sector_header)
+                if known_sectors[ts] != new_sectors[sectorno]:
+                    print("SECTOR MISMATCH", trackno, sectorno)
         
         #print(len(known_sectors))
 
-        #break
+    of2 = open("_dummy.img", "wb")
+    for trackno in range(160):
+        for sectorno in range(10):
+            ts = (trackno, sectorno)
+            if ts in known_sectors:
+                of2.write(known_sectors[ts])
+            else:
+                print("MISSING SECTOR", ts)
+                of2.write(b"CWTOOLBADSECTOR!" * 32)
+
+    of2.close()
         

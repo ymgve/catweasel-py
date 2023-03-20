@@ -65,6 +65,7 @@ while True:
 
             # gotta pass a bytearray to get the proper return value
             while True:
+                ctypes.memset(buff, 0, BUFFERSIZE)
                 try:
                     res = fcntl.ioctl(iof, CW_IOC_READ, bytearray(arr))
                     break
@@ -72,7 +73,7 @@ while True:
                     print("IO call failed, trying again", e)
                     msg = b"IO call failed, trying again"
                     cs.sendall(b"\x00" + struct.pack("<I", len(msg)) + msg)
-                    iof.close()
+                    os.close(iof)
                     
                     time.sleep(1)
                     iof = os.open("/dev/cw0raw0", os.O_RDWR)

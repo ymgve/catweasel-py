@@ -220,10 +220,10 @@ class TrackDecoder(object):
             if self.sectorsize == None:
                 self.sectorsize = new_sectorsize
                 if new_sectorsize != 512:
-                    self.debug(1, "non-standard sector size of %d" % new_sectorsize)
+                    self.debug(1, "non-standard sector size of %d for sector %d" % (new_sectorsize, sectorno))
             else:
                 if self.sectorsize != new_sectorsize:
-                    self.debug(0, "sector size changes during track, ignoring this header")
+                    self.debug(0, "sector size changes from %d to %d during track, ignoring header for sector %d" % (self.sectorsize, new_sectorsize, sectorno))
                     return
             
             self.debug(3, "got valid sector header track %d sector %d" % (trackno, sectorno))

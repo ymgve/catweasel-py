@@ -42,7 +42,7 @@ else:
 
 assumed_highest = -1
 highest_with_data = 0
-target_retry = 10
+target_retry = 3
 prevblockdata = None
 
 td = rawparser.TrackDecoder()
@@ -50,7 +50,7 @@ td.setdebug(1)
 tracktypecounts = {}
 
 allknown = {}
-for trackno in range(168):
+for trackno in range(0, 168, 1):
     known_sectors = {}
     highest_sector = -1
     
@@ -67,7 +67,8 @@ for trackno in range(168):
         if retry == 0:
             timeout = 230
         else:
-            timeout = 500
+            if clock == CW_TRACKINFO_CLOCK_14MHZ:
+                timeout = 500
         
         while True:
             sc.sendall(b"\x01" + struct.pack("<BBBBBII", track_seek, track, side, clock, mode, flags, timeout))

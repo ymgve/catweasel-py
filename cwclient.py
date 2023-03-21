@@ -40,9 +40,10 @@ if not os.path.isfile(filename):
 else:
     of = open(filename, "ab")
 
-assumed_highest = -1
+assumed_highest = 8
 highest_with_data = 0
-target_retry = 3
+target_retry = 30
+
 prevblockdata = None
 
 td = rawparser.TrackDecoder()
@@ -50,6 +51,7 @@ td.setdebug(1)
 tracktypecounts = {}
 
 allknown = {}
+tested_tracks = []
 for trackno in range(0, 168, 1):
     known_sectors = {}
     highest_sector = -1
@@ -103,6 +105,9 @@ for trackno in range(0, 168, 1):
 
         tracktype, new_sectors = td.parse_mfm(blockdata, trackno)
         
+        if tracktype == "amiga":
+            assumed_highest = max(10, assumed_highest)
+            
         if tracktype not in tracktypecounts:
             tracktypecounts[tracktype] = 0
         tracktypecounts[tracktype] += 1
@@ -143,6 +148,8 @@ for trackno in range(0, 168, 1):
     if len(known_sectors) > 0:
         highest_with_data = trackno
 
+    tested_tracks.append(trackno)
+    
 of.close()
     
 badsectors = []
@@ -150,14 +157,15 @@ goodcount = 0
 numtracks = highest_with_data + 1
 
 of2 = open(filename + ".img", "wb")
-for trackno in range(numtracks):
-    for sectorno in range(assumed_highest + 1):
-        if sectorno in allknown[trackno]:
-            of2.write(allknown[trackno][sectorno])
-            goodcount += 1
-        else:
-            of2.write(b"CWTOOLBADSECTOR!" * 32)
-            badsectors.append((trackno, sectorno))
+for trackno in tested_tracks:
+    if trackno <= highest_with_data:
+        for sectorno in range(assumed_highest + 1):
+            if sectorno in allknown[trackno]:
+                of2.write(allknown[trackno][sectorno])
+                goodcount += 1
+            else:
+                of2.write(b"CWTOOLBADSECTOR!" * 32)
+                badsectors.append((trackno, sectorno))
 of2.close()
 
 print("track type stats", tracktypecounts)

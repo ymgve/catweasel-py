@@ -39,31 +39,15 @@ class Bitstream(object):
             n = self.trackdata[self.index] & 0x7f
             self.index += 1
     
-            if self.splits == None:
-                if n < 0x21:
-                    self.pending = 2
-                elif n < 0x23:
-                    self.pending = random.choice((2, 4))
-                elif n < 0x2e:
-                    self.pending = 4
-                elif n < 0x30:
-                    self.pending = random.choice((4, 8))
-                else:
-                    self.pending = 8
-                
+            if n < self.splits[0]:
+                self.pending = 2
+            elif n < self.splits[1]:
+                self.pending = 4
             else:
-                if n < self.splits[0]:
-                    self.pending = 2
-                elif n < self.splits[1]:
-                    self.pending = 4
-                else:
-                    self.pending = 8
+                self.pending = 8
                 
-        self.last2 = (self.last << 1) | (self.pending & 1)
         self.last = self.pending & 1
         self.pending >>= 1
-        
-        self.bitindex += 1
         
         return self.last
     
@@ -161,7 +145,7 @@ class TrackDecoder(object):
         
     def debug(self, level, *msg):
         if level <= self.debuglevel:
-            print("%2d %10d" % (level, self.bs.bitindex), *msg)
+            print("%2d " % (level, ), *msg)
        
     def update_known_sectors(self, sectorno, data):
         if sectorno not in self.known_sectors:
@@ -185,14 +169,14 @@ class TrackDecoder(object):
             
         self.last_found = "dos_gapsync"
             
-    def parse_dos_header(self):
+    def parse_dos_header(self, bs):
         self.debug(3, "found DOS header")
         
         if self.tracktype not in ("unknown", "dos"):
             self.debug(0, "found DOS header on non-DOS disk")
             return
         
-        byte, missync = getbyte(self.bs)
+        byte, missync = getbyte(bs)
         
         if missync != 0:
             self.debug(2, "bit missyncs in DOS header type byte %d" % missync)
@@ -205,7 +189,7 @@ class TrackDecoder(object):
         self.debug(3, "found DOS header type %02x" % byte)
         
         if byte == 0xfe:
-            res, missync = getbytes(self.bs, 6)
+            res, missync = getbytes(bs, 6)
             if missync != 0:
                 self.debug(2, "bit missyncs in DOS header data %d" % missync)
                 return
@@ -255,31 +239,19 @@ class TrackDecoder(object):
             
             self.debug(3, "got valid sector header track %d sector %d" % (trackno, sectorno))
             
-            if self.last_found == "dos_header_valid":
-                self.debug(2, "encountered another sector header before data, prev header %d curr header %d" % (self.last_header, sectorno))
+            # if self.last_found == "dos_header_valid":
+                # self.debug(2, "encountered another sector header before data, prev header %d curr header %d" % (self.last_header, sectorno))
                 
-            self.header_bitindex = self.bs.bitindex
+            return ("header", sectorno)
+            #self.header_bitindex = bs.bitindex
             
-            self.last_found = "dos_header_valid"
-            self.last_header = sectorno
+            # self.last_found = "dos_header_valid"
+            # self.last_header = sectorno
             
-            self.tracktype = "dos"
+            # self.tracktype = "dos"
             
         elif byte == 0xfb:
-            if self.last_found != "dos_header_valid":
-                self.debug(2, "DOS data block with no header, probably at start of track scan")
-                return
-                
-            sectorno = self.last_header
-            self.debug(3, "found data block for sector header %d" % sectorno)
-            
-            distance_to_header = self.bs.bitindex - self.header_bitindex
-            
-            if distance_to_header > 1500:
-                #self.debug(0, "unusually many bits since header, ignoring data as it might belong to another header", distance_to_header, self.last_header)
-                return
-                
-            res, missync = getbytes(self.bs, self.sectorsize + 2)
+            res, missync = getbytes(bs, self.sectorsize + 2)
             if missync != 0:
                 self.debug(2, "bit missyncs in DOS sector data %d" % missync)
                 return
@@ -293,126 +265,90 @@ class TrackDecoder(object):
                 self.debug(2, "bad DOS data CRC")
                 return
                 
-            self.update_known_sectors(sectorno, res[0:-2])
+            return ("data", res[0:self.sectorsize - 2])
             
-            self.last_found = "dos_data"
-
-            self.tracktype = "dos"
-
-    def parse_amiga_sector(self):
-        self.debug(3, "found Amiga header")
-        
-        if self.tracktype not in ("unknown", "amiga"):
-            self.debug(2, "found Amiga header on non-Amiga disk, probably false positive")
-            return
-        
-        words = []
-        total_missing = 0
-        csum = 0
-        for i in range(12):
-            rawres, missing_syncs = getamigaword(self.bs)
-            if rawres == None:
-                self.debug(3, "ran out of Amiga data, probably at end of track")
-                return
-                
-            words.append(rawres)
-            total_missing += missing_syncs
-            csum ^= rawres
-            
-        if total_missing != 0:
-            self.debug(2, "bit missyncs in Amiga header %d" % total_missing)
-            return
-            
-        csum &= 0x55555555
-        if csum != 0:
-            self.debug(2, "bad Amiga header checksum")
-            return
-            
-        header = ((words[0] & 0x55555555) << 1) | (words[1] & 0x55555555)
-        
-        format_id = header >> 24
-        trackno = (header >> 16) & 0xff
-        sectorno = (header >> 8) & 0xff
-        until_end = header & 0xff
-        
-        if format_id != 0xff:
-            self.debug(2, "wrong format ID in Amiga header %02x" % format_id)
-            
-        if trackno != self.target_track:
-            self.debug(0, "wrong track number in Amiga header, is %d but should be %d" % (trackno, self.target_track))
-            return
-            
-        if sectorno < 0 or sectorno > 30: # upper limit dumb number picked at random
-            self.debug(0, "wrong sector number in Amiga header, %d" % sectorno)
-            return
-        
-        self.debug(3, "got valid sector header track %d sector %d" % (trackno, sectorno))
-        
-        csum = 0
-        words = []
-        total_missing = 0
-        csum = 0
-        for i in range(258):
-            rawres, missing_syncs = getamigaword(self.bs)
-            if rawres == None:
-                self.debug(3, "ran out of Amiga data, probably at end of track")
-                return
-                
-            words.append(rawres)
-            total_missing += missing_syncs
-            csum ^= rawres
-            
-        if total_missing != 0:
-            self.debug(2, "bit missyncs in Amiga data %d" % total_missing)
-            return
-            
-        csum &= 0x55555555
-        if csum != 0:
-            self.debug(2, "bad Amiga data checksum")
-            return
-            
-        data = b""
-        for i in range(128):
-            dataword = ((words[i+2] & 0x55555555) << 1) | (words[i+130] & 0x55555555)
-            data += struct.pack(">I", dataword)
-            
-        self.update_known_sectors(sectorno, data)
-        
-        self.last_found = "amiga_data"
-        
-        self.tracktype = "amiga"
-    
     def parse_mfm(self, trackdata, target_track, splits=(0x22, 0x2f)):
         self.target_track = target_track
-        self.sectorsize = None
+        self.sectorsize = 512
         self.bits_since_header = 0
         self.tracktype = "unknown"
         self.last_found = "nothing"
         self.known_sectors = {}
-        self.bs = Bitstream(trackdata, splits)
+        bs = Bitstream(trackdata, splits)
         
+        previndex = 0
         check = 0
+        sectorno = None
+        
+        #sizes =[]
         while True:
-            bit = self.bs.get_bit()
+            bit = bs.get_bit()
             if bit == None:
                 break
                 
             check = (check << 1) | bit
             check &= 0xffffffffffff
 
-            if check == 0x522452245224:
-                self.parse_dos_gap()
+            if check == 0x448944894489:
+                if previndex != 0:
+                    trackdata2 = trackdata[previndex:bs.index]
+                    if sectorno == 1:
+                        foo = ""
+                        for n in trackdata2:
+                            #if n not in (0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,  0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,  0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c):
+                            if 0x17 <= n <= 0x1d:
+                                foo += "  "
+                            elif 0x27 <= n <= 0x2f:
+                                foo += "  "
+                            elif 0x34 <= n <= 0x3d:
+                                foo += "  "
+                            else:
+                                foo += "XX"
+                                
+                        good = False
+                        for losplit in range(0x22-5, 0x22+5):
+                            for hisplit in range(0x2f-5, 0x2f+5):
+                                if not good:
+                                    bs2 = Bitstream(trackdata2, (losplit, hisplit))
+                                    res = self.parse_dos_header(bs2)
+                                    if res != None:
+                                        good = True
+                        if good:
+                            print("GOOD " + trackdata2.hex())
+                        else:
+                            print("     " + trackdata2.hex())
+                        
+                        print("     " + foo)
+                        #print("")
+                        
+                        sectorno = None
+
+                    else:
+                        bs2 = Bitstream(trackdata2, splits)
+                        res = self.parse_dos_header(bs2)
+                        if res != None:
+                            if res[0] == "header":
+                                if len(trackdata2) >= 500:
+                                    #print("oversized header", len(trackdata2))
+                                    sectorno = None
+                                else:
+                                    sectorno = res[1]
+                            else:
+                                sectorno = None
+                        else:
+                            sectorno = None
+                        
+                    #sizes.append(len(trackdata2))
+                    #print(len(trackdata2))
+                    #if self.last_found == "dos_header_valid" and self.last_header == 0:
+                        #print(trackdata2[0:64].hex())
+                    # else:
+                        
+                        
+                previndex = bs.index
                 check = 0
                 
-            elif check & 0xffffffff0000 == 0x448944890000:
-                if check == 0x448944894489:
-                    self.parse_dos_header()
-                else:
-                    self.bs.push_back(16, check & 0xffff)
-                    self.parse_amiga_sector()
-                
-                check = 0
-                
+        #print(sizes)
         return self.tracktype, self.known_sectors
     
 def add_new_sectors(known_sectors, trackno, new_sectors):
@@ -440,82 +376,41 @@ def add_new_sectors(known_sectors, trackno, new_sectors):
     return added
     
 if __name__ == "__main__":
-    known_sectors = {}
-    
-    #splits = [0x22, 0x2f]
-    
-    splitslist = []
-    
-    for distance in range(6):
-        for lodelta in range(-distance, distance+1):
-            for hidelta in range(-distance, distance+1):
-                splits = (0x22 + lodelta, 0x2f + hidelta)
-                
-                if splits not in splitslist:
-                    splitslist.append(splits)
+    f = io.open(sys.argv[1], "rb")
 
-    # for distance in range(2):
-        # for lodelta in range(-distance, distance+1):
-            # splits = (0x22 + lodelta, 0x2f + lodelta)
-            
-            # if splits not in splitslist:
-                # splitslist.append(splits)
-               
-    for processpass in range(2):
-        print("starting pass", processpass)
-        f = io.open(sys.argv[1], "rb")
-
-        magic = f.read(32)
-        if magic != b"cwtool raw data 3".ljust(32, b"\x00"):
-            raise Exception("bad magic")
-            
-        td = TrackDecoder()
-        td.setdebug(1)
+    magic = f.read(32)
+    if magic != b"cwtool raw data 3".ljust(32, b"\x00"):
+        raise Exception("bad magic")
         
-        while True:
-            trackoffset = f.tell()
-            trackheader = f.read(8)
-            if len(trackheader) == 0:
-                break
-                
-            trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
-            if trackmagic != 0xca:
-                raise Exception()
-            trackdata = f.read(tsize)
+    td = TrackDecoder()
+    td.setdebug(-1)
+    
+    while True:
+        trackoffset = f.tell()
+        trackheader = f.read(8)
+        if len(trackheader) == 0:
+            break
             
-            #open("temptracks\\trackdata%03d.bin" % trackno, "wb").write(trackdata)
+        trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
+        if trackmagic != 0xca:
+            raise Exception()
+        trackdata = f.read(tsize)
+        
+        if trackno == int(sys.argv[2]):
+            tracktype, new_sectors = td.parse_mfm(trackdata, trackno)
             
-            target_sectors = 9
             
-            if trackno != 0:
-                continue
-                
-            if trackno >= 160:
-                continue
-
-            if trackno not in known_sectors:
-                known_sectors[trackno] = {}
-                
-            if len(known_sectors[trackno]) == target_sectors:
-                continue
-                
-            totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
-            
-            print("------------- track number %d file offset %x  total good sectors %d" % (trackno, trackoffset, totalsectors))
-            
-            if processpass == 0:
-                tracktype, new_sectors = td.parse_mfm(trackdata, trackno)
-                added = add_new_sectors(known_sectors, trackno, new_sectors)
-                if added != 0:
-                    print("got %d new good sectors, total for track %d" % (added, len(known_sectors[trackno])))
+                # added = add_new_sectors(known_sectors, trackno, new_sectors)
+                # if added != 0:
+                    # print("got %d new good sectors, total for track %d" % (added, len(known_sectors[trackno])))
                         
-            if processpass == 1:
-                if len(known_sectors[trackno]) != target_sectors:
-                    for split in splitslist[1:]:
-                        tracktype, new_sectors = td.parse_mfm(trackdata, trackno, split)
-                        added = add_new_sectors(known_sectors, trackno, new_sectors)
-                        if added != 0:
-                            print("got %d new good sectors with splits %x %x, total for track %d" % (added, split[0], split[1], len(known_sectors[trackno])))
+            # if processpass == 1:
+                # if len(known_sectors[trackno]) != target_sectors:
+                    # for split in splitslist[1:]:
+                        # tracktype, new_sectors = td.parse_mfm(trackdata, trackno, split)
+                        # added = add_new_sectors(known_sectors, trackno, new_sectors)
+                        # if added != 0:
+                            # print("got %d new good sectors with splits %x %x, total for track %d" % (added, split[0], split[1], len(known_sectors[trackno])))
                         
                         # for new_sectors in new_sectors_arr:
                             # for sectorno in new_sectors:
@@ -538,4 +433,3 @@ if __name__ == "__main__":
 
                     # of2.close()
 
-        f.close()

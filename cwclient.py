@@ -40,9 +40,15 @@ if not os.path.isfile(filename):
 else:
     of = open(filename, "ab")
 
-assumed_highest = 8
+highest_sector = 8
 highest_with_data = 0
-target_retry = 30
+
+
+clock = CW_TRACKINFO_CLOCK_14MHZ
+target_retry = 3
+
+splits = (0x22, 0x2f)
+
 
 prevblockdata = None
 
@@ -54,7 +60,6 @@ allknown = {}
 tested_tracks = []
 for trackno in range(0, 168, 1):
     known_sectors = {}
-    highest_sector = -1
     
     retry = 0
     retrycount = target_retry
@@ -62,7 +67,6 @@ for trackno in range(0, 168, 1):
         track_seek = trackno // 2
         track = trackno // 2
         side = trackno % 2
-        clock = CW_TRACKINFO_CLOCK_14MHZ
         mode = CW_TRACKINFO_MODE_INDEX_STORE
         flags = 0
         
@@ -70,7 +74,7 @@ for trackno in range(0, 168, 1):
             timeout = 230
         else:
             if clock == CW_TRACKINFO_CLOCK_14MHZ:
-                timeout = 500
+                timeout = 560
         
         while True:
             sc.sendall(b"\x01" + struct.pack("<BBBBBII", track_seek, track, side, clock, mode, flags, timeout))
@@ -99,41 +103,79 @@ for trackno in range(0, 168, 1):
             else:
                 prevblockdata = blockdata
                 break
-                
+
         trackheader = struct.pack("<BBBBI", trackmagic, trackno, clock, HEADER_FLAG_INDEX_STORED, blocksize)
         of.write(trackheader + blockdata)
-
-        tracktype, new_sectors = td.parse_mfm(blockdata, trackno)
-        
-        if tracktype == "amiga":
-            assumed_highest = max(10, assumed_highest)
-            
-        if tracktype not in tracktypecounts:
-            tracktypecounts[tracktype] = 0
-        tracktypecounts[tracktype] += 1
-            
-        for sectorno in new_sectors:
-            highest_sector = max(highest_sector, sectorno)
-            if sectorno not in known_sectors:
-                known_sectors[sectorno] = new_sectors[sectorno]
-            else:
-                if known_sectors[sectorno] != new_sectors[sectorno]:
-                    print("SECTOR MISMATCH", trackno, sectorno)
+                
+        splits2txt = ""
+        curr_status = {}
+        for searchpass in range(2):
+            if searchpass == 0:
+                stats = [0] * 0x80
+                for n in blockdata:
+                    stats[n & 0x7f] += 1
                     
-        if assumed_highest < highest_sector:
-            assumed_highest = highest_sector
+                loindex = 0
+                lobest = 10000000000000
+                for i in range(0x1b, 0x2b):
+                    if stats[i] < lobest:
+                        lobest = stats[i]
+                        loindex = i
+                        
+                hiindex = 0
+                hibest = 10000000000000
+                for i in range(0x2b, 0x38):
+                    if stats[i] < hibest:
+                        hibest = stats[i]
+                        hiindex = i
+                        
+                splits2 = (loindex, hiindex)
+                splits2txt = "splits %02x %02x" % splits2
+                tracktype, new_sectors = td.parse_mfm(blockdata, trackno, splits2)
+                
+            elif searchpass == 1:
+                tracktype, new_sectors = td.parse_mfm(blockdata, trackno, splits)
+                
+            if tracktype == "amiga":
+                highest_sector = max(10, highest_sector)
+                
+            if len(new_sectors) > 0:
+                highest_sector = max(highest_sector, max(new_sectors))
             
-        sectormap = ""
-        if assumed_highest != -1:
-            for i in range(assumed_highest+1):
-                if i in known_sectors:
-                    sectormap += "@ "
+            if tracktype not in tracktypecounts:
+                tracktypecounts[tracktype] = 0
+            tracktypecounts[tracktype] += 1
+                
+            for sectorno in new_sectors:
+                if sectorno not in known_sectors:
+                    known_sectors[sectorno] = new_sectors[sectorno]
                 else:
-                    sectormap += ". "
+                    if known_sectors[sectorno] != new_sectors[sectorno]:
+                        print("SECTOR MISMATCH", trackno, sectorno)
+
+                if sectorno not in curr_status:
+                    curr_status[sectorno] = searchpass
                     
-        print("Track %3d try %2d: %5x bytes, %2d/%2d sectors  %s  track type %s" % (trackno, retry, blocksize, len(known_sectors), assumed_highest + 1, sectormap, tracktype))
+            if len(known_sectors) == highest_sector + 1:
+                break
+                        
+        sectormap = ""
+        for i in range(highest_sector+1):
+            if i in known_sectors:
+                sectormap += "@ "
+            else:
+                sectormap += ". "
+                    
+        passmap = ""
+        for i in range(highest_sector+1):
+            if i in curr_status:
+                passmap += str(curr_status[i] + 1) + " "
+            else:
+                passmap += ". "
+                
+        print("Track %3d try %2d: %5x bytes, %2d/%2d sectors  %s  track type %s %s %s" % (trackno, retry, blocksize, len(known_sectors), highest_sector + 1, sectormap, tracktype, passmap, splits2txt))
         
-        if len(known_sectors) == assumed_highest + 1:
+        if len(known_sectors) == highest_sector + 1:
             break
                 
         if len(known_sectors) == 0:
@@ -159,7 +201,7 @@ numtracks = highest_with_data + 1
 of2 = open(filename + ".img", "wb")
 for trackno in tested_tracks:
     if trackno <= highest_with_data:
-        for sectorno in range(assumed_highest + 1):
+        for sectorno in range(highest_sector + 1):
             if sectorno in allknown[trackno]:
                 of2.write(allknown[trackno][sectorno])
                 goodcount += 1

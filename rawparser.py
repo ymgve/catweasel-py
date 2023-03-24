@@ -1,20 +1,26 @@
 import struct, sys, hashlib, io, random
 
-def crc16(data, poly=0x8408):
-    crc = 0xFFFF
+crclookup = []
+for i in range(256):
+    crc = 0
+    poly = 0x1021
+    for j in range(8):
+        if (i & (1 << j)) != 0:
+            crc ^= poly
+            
+        if poly & 0x8000:
+            poly = (poly << 1) ^ 0x11021
+        else:
+            poly <<= 1
+            
+    crclookup.append(crc)
+
+def crc16(data):
+    crc = 0xffff
     for c in data:
-        for i in range(8):
-            if (crc & 1) != ((c >> (7-i)) & 1):
-                crc = (crc >> 1) ^ poly
-            else:
-                crc >>= 1
-                
-    res = 0
-    for i in range(16):
-        res = (res << 1) | (crc & 1)
-        crc >>= 1
-        
-    return res
+        crc = ((crc & 0xff) << 8) ^ crclookup[(crc >> 8) ^ c]
+
+    return crc
     
 
 class Bitstream(object):
@@ -446,7 +452,7 @@ if __name__ == "__main__":
     
     splitslist = []
     
-    for distance in range(6):
+    for distance in range(3):
         for lodelta in range(-distance, distance+1):
             for hidelta in range(-distance, distance+1):
                 splits = (0x22 + lodelta, 0x2f + hidelta)
@@ -485,9 +491,9 @@ if __name__ == "__main__":
             
             #open("temptracks\\trackdata%03d.bin" % trackno, "wb").write(trackdata)
             
-            target_sectors = 9
+            target_sectors = 18
             
-            if trackno != 0:
+            if trackno not in (159,):
                 continue
                 
             if trackno >= 160:
@@ -526,16 +532,22 @@ if __name__ == "__main__":
                                     # if known_sectors[ts] != new_sectors[sectorno]:
                             
 
-                    # of2 = open("_dummy.img", "wb")
-                    # for trackno in range(160):
-                        # for sectorno in range(10):
-                            # ts = (trackno, sectorno)
-                            # if ts in known_sectors:
-                                # of2.write(known_sectors[ts])
-                            # else:
-                                # print("MISSING SECTOR", ts)
-                                # of2.write(b"CWTOOLBADSECTOR!" * 32)
-
-                    # of2.close()
-
         f.close()
+        
+        
+        of2 = open("_dummy.img", "wb")
+        for trackno in (5, 11, 113, 157, 159):
+            missings = []
+            for sectorno in range(18):
+                if trackno in known_sectors and sectorno in known_sectors[trackno]:
+                    of2.write(known_sectors[trackno][sectorno])
+                else:
+                    of2.write(b"CWTOOLBADSECTOR!" * 32)
+                    missings.append(sectorno)
+
+            if len(missings) != 0:
+                print("missing from track", trackno, ":", missings)
+                
+        of2.close()
+
+        

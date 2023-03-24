@@ -1,4 +1,19 @@
-import struct, sys, hashlib, io, random
+import struct, sys, hashlib, io, random, time, array
+
+def flip(input, n):
+    res = 0
+    for i in range(n):
+        res = (res << 1) | (input & 1)
+        input >>= 1
+        
+    return res
+    
+def flip8(input):
+    return flip(input, 8)
+
+def flip16(input):
+    return flip(input, 16)
+    
 
 def crc16(data, poly=0x8408):
     crc = 0xFFFF
@@ -15,7 +30,50 @@ def crc16(data, poly=0x8408):
         crc >>= 1
         
     return res
+
+crclookup = []
+for i in range(256):
+    crc = 0
+    poly = 0x1021
+    for j in range(8):
+        if (i & (1 << j)) != 0:
+            crc ^= poly
+            
+        if poly & 0x8000:
+            poly = (poly << 1) ^ 0x11021
+        else:
+            poly <<= 1
+            
+    crclookup.append(crc)
+
+def crc16a(data):
+    crc = 0xffff
+    for c in data:
+        for i in range(8):
+            if (crc >> 15) != ((c >> (7-i)) & 1):
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc <<= 1
+            
+            crc &= 0xffff 
+            
+        print("fooo %04x" % crc)
+        
+    res = 0
+    for i in range(16):
+        res = (res << 1) | (crc & 1)
+        crc >>= 1
+    # res = crc
     
+    return res
+    
+def crc16b(data):
+    crc = 0xffff
+    for c in data:
+        crc = ((crc & 0xff) << 8) ^ crclookup[(crc >> 8) ^ c]
+
+    return crc
+
 
 class Bitstream(object):
     def __init__(self, trackdata, splits):
@@ -440,6 +498,30 @@ def add_new_sectors(known_sectors, trackno, new_sectors):
     return added
     
 if __name__ == "__main__":
+    # res = crc16(b"\x08")
+    # print(hex(res))
+    
+    #foo = b"\xfe\xfedasadsdsqsda"
+    
+    #data = open(sys.argv[1], "rb").read()
+    
+    data = random.randbytes(1000000)
+    
+    start = time.time()
+    res = crc16(data)
+    print(time.time() - start, hex(res))
+
+    start = time.time()
+    res = crc16b(data)
+    print(time.time() - start, hex(res))
+
+    # res = crc16a(foo)
+    # print(hex(res))
+    
+    # res = crc16b(foo)
+    # print(hex(res))
+    
+    exit()
     known_sectors = {}
     
     f = io.open(sys.argv[1], "rb")
@@ -451,7 +533,7 @@ if __name__ == "__main__":
     td = TrackDecoder()
     td.setdebug(0)
     
-    target_sectors = 11
+    target_sectors = 18
     
     while True:
         trackoffset = f.tell()
@@ -469,6 +551,9 @@ if __name__ == "__main__":
             
         if trackno not in known_sectors:
             known_sectors[trackno] = {}
+            
+        # if trackno != 7:
+            # continue
             
         if len(known_sectors[trackno]) == target_sectors:
             continue
@@ -515,3 +600,18 @@ if __name__ == "__main__":
                 
 
     f.close()
+    
+    of2 = open("_dummy.img", "wb")
+    for trackno in range(160):
+        missings = []
+        for sectorno in range(18):
+            if trackno in known_sectors and sectorno in known_sectors[trackno]:
+                of2.write(known_sectors[trackno][sectorno])
+            else:
+                of2.write(b"CWTOOLBADSECTOR!" * 32)
+                missings.append(sectorno)
+
+        if len(missings) != 0:
+            print("missing from track", trackno, ":", missings)
+            
+    of2.close()    

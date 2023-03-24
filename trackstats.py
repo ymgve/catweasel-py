@@ -19,7 +19,9 @@ while True:
         raise Exception()
     trackdata = f.read(tsize)
     
-    if trackno == target:
+    #if target == -1 or trackno == target:
+    if trackno % 2 == 0:
+        print("----------- track", trackno)
         stats = [0] * 0x80
         for c in trackdata:
             stats[c & 0x7f] += 1

@@ -1,6 +1,7 @@
 import socket, struct, sys, os, time
 
 import rawparser
+from current_drive_config import *
 
 CW_TRACKINFO_CLOCK_14MHZ = 0
 CW_TRACKINFO_CLOCK_28MHZ = 1
@@ -40,12 +41,20 @@ if not os.path.isfile(filename):
 else:
     of = open(filename, "ab")
 
-highest_sector = 8
+
+# dummy track to contain metadata about the current dump
+data = "Disk dump started %s with drive %s" % (time.ctime(), CURRENT_DRIVE)
+data = data.encode("utf8")
+header = struct.pack("<BBBBI", 0, 0, 0, 0, len(data))
+of.write(header + data)
+
+
+highest_sector = 17
 highest_with_data = 0
 
 
-clock = CW_TRACKINFO_CLOCK_14MHZ
-target_retry = 3
+clock = CW_TRACKINFO_CLOCK_28MHZ
+target_retry = 100
 
 splits = (0x22, 0x2f)
 
@@ -59,6 +68,7 @@ tracktypecounts = {}
 allknown = {}
 tested_tracks = []
 for trackno in range(0, 168, 1):
+# for trackno in range(89, 130, 1):
     known_sectors = {}
     
     retry = 0
@@ -71,10 +81,10 @@ for trackno in range(0, 168, 1):
         flags = 0
         
         if retry == 0:
-            timeout = 230
+            timeout = 250
         else:
             if clock == CW_TRACKINFO_CLOCK_14MHZ:
-                timeout = 560
+                timeout = 500
         
         while True:
             sc.sendall(b"\x01" + struct.pack("<BBBBBII", track_seek, track, side, clock, mode, flags, timeout))

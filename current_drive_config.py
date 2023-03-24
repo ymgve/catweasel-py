@@ -1,0 +1,1 @@
+CURRENT_DRIVE = "Mitsumi D359T5 serial 8795249"

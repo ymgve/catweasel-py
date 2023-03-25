@@ -49,12 +49,12 @@ header = struct.pack("<BBBBI", 0, 0, 0, 0, len(data))
 of.write(header + data)
 
 
-highest_sector = 17
+highest_sector = 8
 highest_with_data = 0
 
 
 clock = CW_TRACKINFO_CLOCK_28MHZ
-target_retry = 100
+target_retry = 20
 
 splits = (0x22, 0x2f)
 
@@ -67,8 +67,8 @@ tracktypecounts = {}
 
 allknown = {}
 tested_tracks = []
-for trackno in range(0, 168, 1):
-# for trackno in range(89, 130, 1):
+# for trackno in range(0, 164, 1):
+for trackno in range(98, 103):
     known_sectors = {}
     
     retry = 0
@@ -220,6 +220,7 @@ for trackno in tested_tracks:
                 badsectors.append((trackno, sectorno))
 of2.close()
 
+print(filename)
 print("track type stats", tracktypecounts)
 print("%3d (%3d) tracks read (sectors: good %4d  bad %4d)" % (numtracks, numtracks // 2, goodcount, len(badsectors)))
 for trackno in range(numtracks):

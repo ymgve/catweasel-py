@@ -28,7 +28,7 @@ class Bitstream(object):
         self.index = 0
         self.pending = 0
         self.splitlut = splitlut
-        self.last = 0
+        self.last = None
         
         
     def get_bit(self):
@@ -39,7 +39,7 @@ class Bitstream(object):
             n = self.splitlut[self.trackdata[self.index]]
             self.index += 1
     
-            self.pending = 1 << n
+            self.pending = n
                 
         self.last = self.pending & 1
         self.pending >>= 1
@@ -65,27 +65,10 @@ def getbyte(bs):
         if a == None or b == None:
             return None, missing_syncs
             
-        s = a * 2 + b
-        if s == 1:
-            bit = 1
+        if b == 0 and last == a:
+            missing_syncs += 1
             
-        elif s == 0:
-            if last == 0:
-                missing_syncs += 1
-                
-            bit = 0
-            
-        elif s == 2:
-            # never happens
-            # if last == 1:
-                # missing_syncs += 1
-                
-            bit = 0
-            
-        else:
-            raise Exception("DSDDS")
-            
-        res = (res << 1) | bit
+        res = (res << 1) | b
         
     return res, missing_syncs
            
@@ -132,7 +115,6 @@ def getamigaword(bs):
     # return res, totalmiss
 
 def getbytes(bs, count):
-    totalmiss = 0
     res = bytearray()
     for i in range(count):
         byte, missync = getbyte(bs)
@@ -459,35 +441,12 @@ def add_new_sectors(known_sectors, trackno, new_sectors):
                 
     return added
     
-def split_track(trackdata, splitlut):
-    bs = Bitstream(trackdata, splitlut)
-    prevsplit = 0
-    
-    splits = []
-    check = 0
-    while True:
-        bit = bs.get_bit()
-        if bit == None:
-            break
-            
-        check = (check << 1) | bit
-        check &= 0xffffffffffff
-
-        if check == 0x448944894489:
-            splits.append(trackdata[prevsplit:bs.index])
-            prevsplit = bs.index
-            check = 0
-    
-    splits.append(trackdata[prevsplit:])
-    
-    return splits
-    
-def split_track2(trackdata, splitlut):
+def find_dos_syncs_fast(trackdata, splitlut):
     trackdata2 = bytes(splitlut[x] for x in trackdata)
     
-    syncmark = bytes((3, 2, 3, 2, 1, 3, 2, 3, 2, 1, 3, 2, 3, 2))
+    syncmark = bytes((8, 4, 8, 4, 2, 8, 4, 8, 4, 2, 8, 4, 8, 4))
     
-    positions = [-14]
+    positions = []
     
     pos = -1
     while True:
@@ -498,43 +457,36 @@ def split_track2(trackdata, splitlut):
             
         positions.append(pos)
         
-    splits = []
-    for i in range(len(positions)-1):
-        splits.append(trackdata[positions[i]+14:positions[i+1]])
-        
-    if len(positions) >= 1:
-        splits.append(trackdata[positions[-1]+14:])
+    return set(positions)
     
-    return splits
-    
-def split_track3(trackdata):
-    prev = 0
+def find_dos_sync_deep(trackdata):
+    positions = []
     goal = (0x37, 0x28, 0x37, 0x28, 0x1a, 0x37, 0x28, 0x37, 0x28, 0x1a, 0x37, 0x28, 0x37, 0x28)
     for i in range(len(trackdata)-14):
         cand = trackdata[i:i+14]
         
-        res = sum((cand[j] - goal[j])**2 for j in range(14))
+        score = sum((cand[j] - goal[j])**2 for j in range(14))
         
-        if res < 1000:
-            dist = i - prev
-            print("maybe", res, dist)
-            prev = i
+        if score < 1000:
+            positions.append((i, score))
+            
+    return positions
         
         
 
 def make_lut(lo, hi):
     splitlut = [0] * 256
     for i in range(0, lo):
-        splitlut[i] = 1
-        splitlut[i+0x80] = 1
-        
-    for i in range(lo, hi):
         splitlut[i] = 2
         splitlut[i+0x80] = 2
         
+    for i in range(lo, hi):
+        splitlut[i] = 4
+        splitlut[i+0x80] = 4
+        
     for i in range(hi, 0x80):
-        splitlut[i] = 3
-        splitlut[i+0x80] = 3
+        splitlut[i] = 8
+        splitlut[i+0x80] = 8
         
     return splitlut
 
@@ -579,7 +531,7 @@ def parse_data(bs):
     
 
 luts = []
-dist = 6
+dist = 10
 for i in range(-dist, dist+1):
     for j in range(-dist, dist+1):
         lo = 0x22 + i
@@ -635,288 +587,430 @@ def decode_parts(parts, lut):
             parsed.append("badsync")
             
     return parsed
-            
-def get_best_bytes(part, quick=False):
-    best = None
-    for dist, lo, hi, lut in luts:
-        bs = Bitstream(part, lut)
-        res, missyncs = getbytes(bs, 7)
-        
-        if missyncs == 0 and len(res) == 7:
-            if res[0] == 0xfe:
-                if crc16(b"\xa1\xa1\xa1" + res) == 0:
-                    if dist != 0:
-                        print("had to go extra distance to get valid header", dist)
-                        
-                    return ("header", struct.unpack("<BBBB", res[1:5]))
+
+
+def get_data(bs, sectorsize, want_sectordata=True):
+    res, missyncs = getbytes(bs, 7)
+    if missyncs == 0 and len(res) == 7:
+        if res[0] == 0xfe:
+            if crc16(b"\xa1\xa1\xa1" + res) == 0:
+                return res[:-2]
                 
-            elif res[0] == 0xfb:
-                res2, missyncs = getbytes(bs, 508)
-                if missyncs == 0 and crc16(b"\xa1\xa1\xa1" + res + res2) == 0:
-                    if dist != 0:
-                        print("had to go extra distance to get valid data", dist)
-                        
-                    return ("data", res[1:] + res2[:506])
-        
-        if quick:
-            break
-            
-    return ("bad", None)
+        elif res[0] == 0xfb:
+            if want_sectordata:
+                res2, missyncs = getbytes(bs, sectorsize - 4)
+                if missyncs == 0 and len(res2) == sectorsize - 4 and crc16(b"\xa1\xa1\xa1" + res + res2) == 0:
+                    data = res + res2[:-2]
+                    return data
+                    
+            else:
+                return res
+                
+    return None
     
+def make_custom_track_lut(blockdata):
+    stats = [0] * 0x80
+    for n in blockdata:
+        stats[n & 0x7f] += 1
+        
+    loindex = 0
+    lobest = 10000000000000
+    for i in range(0x1b, 0x2b):
+        if stats[i] < lobest:
+            lobest = stats[i]
+            loindex = i
+            
+    hiindex = 0
+    hibest = 10000000000000
+    for i in range(0x2b, 0x38):
+        if stats[i] < hibest:
+            hibest = stats[i]
+            hiindex = i
+            
+    return make_lut(loindex, hiindex)
+
+
+class Trackscan(object):
+    def __init__(self, trackoffset, trackno, clock, flags, trackdata):
+        self.trackoffset = trackoffset
+        self.trackno = trackno
+        self.clock = clock
+        self.flags = flags
+        self.trackdata = trackdata
+        self.claimed_trackno = None
+        self.claimed_sectorsize = None
+        
+
 if __name__ == "__main__":
     known_sectors = {}
-    known_data = set()
-    orphans = set()
+    # known_data = set()
+    # orphans = set()
+
+    target_sectors = 18
     
-    if len(sys.argv) == 3:
-        target_track = int(sys.argv[2])
-    else:
-        target_track = None
+    
+    # if len(sys.argv) == 3:
+        # target_track = int(sys.argv[2])
+    # else:
+        # target_track = None
         
-    for passno in range(2):
-        f = open(sys.argv[1], "rb")
+    f = open(sys.argv[1], "rb")
 
-        magic = f.read(32)
-        if magic != b"cwtool raw data 3".ljust(32, b"\x00"):
-            raise Exception("bad magic")
-            
-        target_sectors = 18
+    magic = f.read(32)
+    if magic != b"cwtool raw data 3".ljust(32, b"\x00"):
+        raise Exception("bad magic")
         
-        print("numluts", len(luts))
+    scans = []
+    
+    while True:
+        trackoffset = f.tell()
+        trackheader = f.read(8)
+        if len(trackheader) == 0:
+            break
+            
+        trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
+        trackdata = f.read(tsize)
         
-        while True:
-            trackoffset = f.tell()
-            trackheader = f.read(8)
-            if len(trackheader) == 0:
-                break
-                
-            trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
+        # comment data
+        if trackmagic == 0:
+            continue
             
-            # comment data
-            if trackmagic == 0:
-                f.read(tsize)
-                continue
-                
-            if trackmagic != 0xca:
-                raise Exception()
-                
-            trackdata = f.read(tsize)
-            
-            if trackno not in known_sectors:
-                known_sectors[trackno] = {}
+        if trackmagic != 0xca:
+            raise Exception()
 
-            if len(known_sectors[trackno]) == target_sectors:
-                continue
+        scan = Trackscan(trackoffset, trackno, clock, flags, trackdata)
+        
+        scans.append(scan)
+        
+        known_sectors[trackno] = {}
+        
+    # fast scan
+    for scan in scans:
+        # assume all track numbers are valid and ignore tracks based on that
+        if len(known_sectors[scan.trackno]) == target_sectors:
+            continue
 
-            if trackno >= 160:
-                continue
-                
-            if target_track != None and target_track != trackno:
-                continue
-                
-            totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
+        totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
+        
+        print("--------- scan level 1: track number %d file offset %x  total good sectors %d" % (scan.trackno, scan.trackoffset, totalsectors))
+
+        scan.positions = find_dos_syncs_fast(scan.trackdata, baselut)
+        
+        scan.found_data = {}
+        
+        currsector = None
+        
+        poslist = sorted(scan.positions)
+        
+        for pos in range(len(poslist)-1):
+            startpos = poslist[pos]+14
+            endpos = poslist[pos+1]
+            segment = scan.trackdata[startpos:endpos]
+            bs = Bitstream(segment, baselut)
             
-            print("------------- track number %d file offset %x  total good sectors %d" % (trackno, trackoffset, totalsectors))
-                
-            #split_track3(trackdata)
+            added = False
+            sector_set = False
             
-            parts = split_track2(trackdata, baselut)
+            want_sectordata = True
+            if currsector == None or currsector in known_sectors[scan.claimed_trackno]:
+                want_sectordata = False
             
-            currsector = None
-            for part in parts[1:]:
-                if currsector != None and currsector in known_sectors[trackno] and len(part) >= 2000:
-                    currsector = None
-                    
-                    continue
-                    
-                #print("%10d %s" % (len(part), part.hex()))
-                
-                # if currsector == 17 and trackno == 127:
-                    # print(part.hex())
-                    
-                res = get_best_bytes(part, passno==0)
-                if res[0] == "header":
+            data = get_data(bs, scan.claimed_sectorsize, want_sectordata)
+            if data != None:
+                if data[0] == 0xfe:
+                    cyl, side, sectorno, sectorsizebits = struct.unpack("<BBBB", data[1:5])
+                    header_trackno = side + cyl * 2
+                    sectorsize = 1 << (7 + sectorsizebits)
                     ok = True
-                    cyl, side, sectorno, sectorsizebits = res[1]
-                    
-                    #print("header", cyl, side, sectorno, sectorsizebits)
-                    
+            
                     if side not in (0, 1):
+                        print("side not 0 or 1")
                         ok = False
                         
-                    if side + cyl * 2 != trackno:
-                        ok = False
+                    if scan.claimed_trackno != None:
+                        if header_trackno != scan.claimed_trackno:
+                            print("track number different from other track number on track", header_trackno, scan.claimed_trackno)
+                            ok = False
                         
-                    if sectorsizebits != 2:
-                        ok = False
+                    if scan.claimed_sectorsize != None:
+                        if sectorsize != scan.claimed_sectorsize:
+                            print("sector size changed", sectorsize, scan.claimed_sectorsize)
+                            ok = False
 
                     if sectorno >= 30:
-                        ok = False
-                        
-                    if len(part) > 500:
+                        print("sector number too large")
                         ok = False
                         
                     if ok:
-                        currsector = sectorno - 1
-                    else:
-                        currsector = None
+                        if len(segment) < 500:
+                            currsector = sectorno - 1
+                            sector_set = True
+
+                            scan.found_data[startpos] = ("validheader", header_trackno, sectorno - 1)
+                        else:
+                            scan.found_data[startpos] = ("header", header_trackno, sectorno - 1)
                         
-                elif res[0] == "data":
-                    #print("data")
-                    data = bytes(res[1])
-                    fingerprint = hashlib.sha256(data).hexdigest()[0:8]
-                    if currsector != None:
-                        added = add_new_sector(known_sectors, trackno, currsector, data)
-                        known_data.add(data)
-                        if data in orphans:
-                            print("connected orphan", fingerprint, "with track and sector", trackno, currsector)
-                            orphans.remove(data)
-                    else:
-                        if data not in known_data:
-                            print("orphaned data with hash", fingerprint)
-                            orphans.add(data)
+                            
+                        scan.claimed_trackno = header_trackno
+                        scan.claimed_sectorsize = sectorsize
                         
-                    currsector = None
+                        added = True
+                    
+                elif data[0] == 0xfb:
+                    if want_sectordata:
+                        add_new_sector(known_sectors, scan.claimed_trackno, currsector, data[1:])
+                        
+                        scan.found_data[startpos] = ("data", len(segment))
+                        added = True
+                        
+                    else:
+                        if currsector != None:
+                            scan.found_data[startpos] = ("assumed_known_data", len(segment))
+                            added = True
+                        else:
+                            scan.found_data[startpos] = ("assumed_data", len(segment))
+                            added = True
+            
+            if not added:
+                scan.found_data[startpos] = ("unknown", len(segment))
+                    
+            if not sector_set:
+                currsector = None
+
+    for scan in scans:
+        # assume all track numbers are valid and ignore tracks based on that
+        if len(known_sectors[scan.trackno]) == target_sectors:
+            continue
+
+        totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
+        
+        print("--------- scan level 2: track number %d file offset %x  total good sectors %d" % (scan.trackno, scan.trackoffset, totalsectors))
+
+        customlut = make_custom_track_lut(scan.trackdata)
+        newpositions = find_dos_syncs_fast(scan.trackdata, customlut)
+        
+        added = newpositions - scan.positions
+        if len(added) > 0:
+            print("new", added)
+            
+        scan.positions = scan.positions | newpositions
+        
+        currsector = None
+        
+        poslist = sorted(scan.positions)
+        
+        for pos in range(len(poslist)-1):
+            startpos = poslist[pos]+14
+            endpos = poslist[pos+1]
+
+            sector_set = False
+            
+            skip = False
+            if startpos in scan.found_data:
+                prevtype = scan.found_data[startpos][0]
+                if prevtype == "validheader":
+                    currsector = scan.found_data[startpos][2]
+                    sector_set = True
+                    skip = True
+                    
+                elif prevtype in ("data", "assumed_known_data"):
+                    skip = True
                     
                 else:
-                    #print("other")
-                    currsector = None
-                    
-                # bs = Bitstream(part, lut)
-                # byte, missyncs = getbyte(bs)
-                # if missyncs == 0:
-                    # if byte == 0xfe:
-                        # if len(part) >= 500:
-                            # parsed.append("oversized")
-                            
-                            # print("oversized header", trackno, len(part))
-                            # split_track3(part)
-                            # best = 2
-                            # bestsplit = None
-                            # for lo, hi, lut2 in luts:
-                                # splits2 = split_track2(part, lut2)
-                                # if len(splits2) >= 2:
-                                    # print("split %d with %02x %02x" % (len(splits2), lo, hi))
-                                    # res = decode_parts(splits2, lut2)
-                                    # print("qqqqqqqqq", res)
-                            
-                        # else:
-                            # header = parse_header(bs)
-                            # if header != None:
-                                # parsed.append(("header", header))
-                            # else:
-                                # parsed.append("badheader")
+                    print("Replacing data of type", prevtype)
+            if skip:
+                continue
+                
+            added = False
+            
+            segment = scan.trackdata[startpos:endpos]
+            bs = Bitstream(segment, customlut)
+            
+            want_sectordata = True
+            if currsector == None or currsector in known_sectors[scan.claimed_trackno]:
+                want_sectordata = False
+            
+            data = get_data(bs, scan.claimed_sectorsize, want_sectordata)
+            if data != None:
+                if data[0] == 0xfe:
+                    cyl, side, sectorno, sectorsizebits = struct.unpack("<BBBB", data[1:5])
+                    header_trackno = side + cyl * 2
+                    sectorsize = 1 << (7 + sectorsizebits)
+                    ok = True
+            
+                    if side not in (0, 1):
+                        print("side not 0 or 1")
+                        ok = False
+                        
+                    if scan.claimed_trackno != None:
+                        if header_trackno != scan.claimed_trackno:
+                            print("track number different from other track number on track", header_trackno, scan.claimed_trackno)
+                            ok = False
+                        
+                    if scan.claimed_sectorsize != None:
+                        if sectorsize != scan.claimed_sectorsize:
+                            print("sector size changed", sectorsize, scan.claimed_sectorsize)
+                            ok = False
+
+                    if sectorno >= 30:
+                        print("sector number too large")
+                        ok = False
+                        
+                    if ok:
+                        if len(segment) < 500:
+                            currsector = sectorno - 1
+                            sector_set = True
+
+                            print("Got new valid header", currsector)
+                            scan.found_data[startpos] = ("validheader", header_trackno, sectorno - 1)
+                        else:
+                            scan.found_data[startpos] = ("header", header_trackno, sectorno - 1)
+                        
                                 
-                    # elif byte == 0xfb:
-                        # data = parse_data(bs)
-                        # if data != None:
-                            # parsed.append("data")
-                        # else:
-                            # parsed.append("baddata")
+                        scan.claimed_trackno = header_trackno
+                        scan.claimed_sectorsize = sectorsize
                         
-                    # else:
-                        # parsed.append("badbyte")
-                        
-                # else:
-                    # parsed.append("badsync")
+                        added = True
                     
-                        
-                        
-            #print(parsed)
-                
-            # best = len(splits)
-            # for lo, hi, lut in luts:
-                # splits = split_track2(trackdata, lut)
-                # if len(splits) > best:
-                    # best = len(splits)
-                    # print("new best split %d with %02x %02x" % (best, lo, hi))
-                    
-            # start = time.time()
-            # splits = split_track(trackdata, splitlut)
-            # print(trackno, len(splits), time.time() - start)
-            
-            # start = time.time()
-            # splits2 = split_track2(trackdata, splitlut)
-            # print(trackno, len(splits2), time.time() - start)
-            
-            # print([len(x) for x in splits2])
-            # print(len(splits[0]), splits[0][0:100])
-            # print(len(splits2[0]), splits2[0][0:100])
-            
-            #print("")
-            # if trackno >= 160:
-                # continue
-                
-            # if trackno not in known_sectors:
-                # known_sectors[trackno] = {}
-                
-            # if trackno != 7:
-                # continue
-                
-            # if len(known_sectors[trackno]) == target_sectors:
-                # continue
-                
-            # totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
-            
-            # print("------------- track number %d file offset %x  total good sectors %d" % (trackno, trackoffset, totalsectors))
-            
-            # tracktype, new_sectors1 = td.parse_mfm(trackdata, trackno)
-            
-            # stats = [0] * 0x80
-            # for n in trackdata:
-                # stats[n & 0x7f] += 1
-                
-            # loindex = 0
-            # lobest = 10000000000000
-            # for i in range(0x1b, 0x2b):
-                # if stats[i] <= lobest:
-                    # lobest = stats[i]
-                    # loindex = i
-                    
-            # hiindex = 0
-            # hibest = 10000000000000
-            # for i in range(0x2b, 0x38):
-                # if stats[i] <= hibest:
-                    # hibest = stats[i]
-                    # hiindex = i
-            
-            # tracktype, new_sectors2 = td.parse_mfm(trackdata, trackno, (loindex, hiindex))
-            
-            # for sectorno in new_sectors2:
-                # if sectorno not in new_sectors1:
-                    # print("Got extra sector %d with new splits %02x %02x" % (sectorno, loindex, hiindex))
+                elif data[0] == 0xfb:
+                    if want_sectordata:
+                        add_new_sector(known_sectors, scan.claimed_trackno, currsector, data[1:])
+                        print("Got new valid data", currsector)
+                        scan.found_data[startpos] = ("data", len(segment))
+                        added = True
+                                
+                    else:
+                        if currsector != None:
+                            scan.found_data[startpos] = ("assumed_known_data", len(segment))
+                            added = True
+                        else:
+                            scan.found_data[startpos] = ("assumed_data", len(segment))
+                            added = True
 
-            # for sectorno in new_sectors1:
-                # if sectorno not in new_sectors2:
-                    # print("MISSING SECTOR WITH NEW SPLITS %d splits %02x %02x" % (sectorno, loindex, hiindex))
+            if not added:
+                scan.found_data[startpos] = ("unknown", len(segment))
                     
-            #print("sectors", len(new_sectors1), len(new_sectors2))
-            # added = add_new_sectors(known_sectors, trackno, new_sectors1)
-            # added += add_new_sectors(known_sectors, trackno, new_sectors2)
-            # if added != 0:
-                # print("got %d new good sectors, total for track %d" % (added, len(known_sectors[trackno])))
-                    
-
-        # f.close()
-        
-    if target_track == None:
-        writecount = 0
-        of2 = open(sys.argv[1] + ".img", "wb")
-        for trackno in range(160):
-            missings = []
-            for sectorno in range(18):
-                if trackno in known_sectors and sectorno in known_sectors[trackno]:
-                    of2.write(known_sectors[trackno][sectorno])
-                    writecount += 1
-                else:
-                    of2.write(b"CWTOOLBADSECTOR!" * 32)
-                    missings.append(sectorno)
-
-            if len(missings) != 0:
-                print("missing from track", trackno, ":", missings)
-                
-        of2.close()    
-        
-        print("sectors written", writecount)
+            if not sector_set:
+                currsector = None
     
-    print("remaining orphans", orphans)
+    for scan in scans:
+        # assume all track numbers are valid and ignore tracks based on that
+        if len(known_sectors[scan.trackno]) == target_sectors:
+            continue
+
+        totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
+        
+        print("--------- scan level 3: track number %d file offset %x  total good sectors %d" % (scan.trackno, scan.trackoffset, totalsectors))
+        
+        # for pos in sorted(scan.positions):
+            # startpos = pos + 14
+            # if startpos in scan.found_data:
+                # entry = scan.found_data[startpos]
+                # print("%6d %s" % (startpos, entry))
+            # else:
+                # print("%6d [MISSING]" % startpos)
+
+        # assume sector size if not set
+        sectorsize = scan.claimed_sectorsize
+        if sectorsize == None:
+            print("had to assume sectorsize 512")
+            sectorsize = 512
+        
+        newpositions = find_dos_sync_deep(scan.trackdata)
+        
+        for pos, score in newpositions:
+            startpos = pos + 14
+            
+            skip = False
+            if startpos in scan.found_data:
+                prevtype = scan.found_data[startpos][0]
+                if prevtype in ("header", "validheader", "data"):
+                    skip = True
+                    
+            if skip:
+                continue
+                
+            data = None
+            for dist, lo, hi, lut in luts:
+                segment = scan.trackdata[startpos:]
+                bs = Bitstream(segment, lut)
+                data = get_data(bs, sectorsize, True)
+                if data != None:
+                    #print("Got extra data with different lut", dist, startpos in scan.found_data)
+                    break
+                    
+            if data != None:
+                if data[0] == 0xfe:
+                    cyl, side, sectorno, sectorsizebits = struct.unpack("<BBBB", data[1:5])
+                    header_trackno = side + cyl * 2
+                    sectorsize = 1 << (7 + sectorsizebits)
+                    ok = True
+            
+                    if side not in (0, 1):
+                        print("side not 0 or 1")
+                        ok = False
+                        
+                    if scan.claimed_trackno != None:
+                        if header_trackno != scan.claimed_trackno:
+                            print("track number different from other track number on track", header_trackno, scan.claimed_trackno)
+                            ok = False
+                        
+                    if scan.claimed_sectorsize != None:
+                        if sectorsize != scan.claimed_sectorsize:
+                            print("sector size changed", sectorsize, scan.claimed_sectorsize)
+                            ok = False
+
+                    if sectorno >= 30:
+                        print("sector number too large")
+                        ok = False
+                        
+                    if ok:
+                        scan.found_data[startpos] = ("header", header_trackno, sectorno - 1)
+                                
+                        scan.claimed_trackno = header_trackno
+                        scan.claimed_sectorsize = sectorsize
+                        
+                        added = True
+                    
+                elif data[0] == 0xfb:
+                    closest = None
+                    for startpos2 in sorted(scan.found_data):
+                        if startpos2 < startpos:
+                            closest = startpos2
+                        else:
+                            break
+                            
+                    if closest != None:
+                        if startpos - closest < 500 and scan.found_data[closest][0] in ("header", "validheader"):
+                            currsector = scan.found_data[closest][2]
+                            if currsector not in known_sectors[scan.claimed_trackno]:
+                                print("got new sector %d at position %d with header at position %d distance %d" % (currsector, startpos, closest, startpos - closest))
+                                
+                            add_new_sector(known_sectors, scan.claimed_trackno, currsector, data[1:])
+                            scan.found_data[startpos] = ("data")
+                            added = True
+                
+            if not added:
+                scan.found_data[startpos] = ("unknown", len(segment))
+                
+# if target_track == None:
+writecount = 0
+of2 = open(sys.argv[1] + ".img", "wb")
+for trackno in range(160):
+    missings = []
+    for sectorno in range(18):
+        if trackno in known_sectors and sectorno in known_sectors[trackno]:
+            of2.write(known_sectors[trackno][sectorno])
+            writecount += 1
+        else:
+            of2.write(b"CWTOOLBADSECTOR!" * 32)
+            missings.append(sectorno)
+
+    if len(missings) != 0:
+        print("missing from track", trackno, ":", missings)
+        
+of2.close()    
+
+print("sectors written", writecount)
+
+# print("remaining orphans", orphans)

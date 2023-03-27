@@ -68,7 +68,7 @@ tracktypecounts = {}
 allknown = {}
 tested_tracks = []
 # for trackno in range(0, 164, 1):
-for trackno in range(98, 103):
+for trackno in (1, 157, 159):
     known_sectors = {}
     
     retry = 0

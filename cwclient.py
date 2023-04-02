@@ -53,8 +53,8 @@ highest_sector = 8
 highest_with_data = 0
 
 
-clock = CW_TRACKINFO_CLOCK_28MHZ
-target_retry = 20
+clock = CW_TRACKINFO_CLOCK_14MHZ
+target_retry = 3
 
 splits = (0x22, 0x2f)
 
@@ -67,8 +67,8 @@ tracktypecounts = {}
 
 allknown = {}
 tested_tracks = []
-# for trackno in range(0, 164, 1):
-for trackno in (1, 157, 159):
+for trackno in range(0, 168, 1):
+# for trackno in [98]:
     known_sectors = {}
     
     retry = 0
@@ -161,7 +161,7 @@ for trackno in (1, 157, 159):
                     known_sectors[sectorno] = new_sectors[sectorno]
                 else:
                     if known_sectors[sectorno] != new_sectors[sectorno]:
-                        print("SECTOR MISMATCH", trackno, sectorno)
+                        print("SECTOR MISMATCH", sectorno)
 
                 if sectorno not in curr_status:
                     curr_status[sectorno] = searchpass
@@ -205,6 +205,7 @@ for trackno in (1, 157, 159):
 of.close()
     
 badsectors = []
+badtracks = set()
 goodcount = 0
 numtracks = highest_with_data + 1
 
@@ -218,11 +219,23 @@ for trackno in tested_tracks:
             else:
                 of2.write(b"CWTOOLBADSECTOR!" * 32)
                 badsectors.append((trackno, sectorno))
+                badtracks.add(trackno)
 of2.close()
 
 print(filename)
-print("track type stats", tracktypecounts)
-print("%3d (%3d) tracks read (sectors: good %4d  bad %4d)" % (numtracks, numtracks // 2, goodcount, len(badsectors)))
+
+if "dos" in tracktypecounts and 0 in allknown and 0 in allknown[0]:
+    bootsector = allknown[0][0]
+    
+    bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
+        
+    print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
+    if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
+        print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
+        
+
+print("    track type stats", tracktypecounts)
+print("    %3d (%3d) tracks read (sectors: good %4d  bad %4d)" % (numtracks, numtracks // 2, goodcount, len(badsectors)))
 for trackno in range(numtracks):
     s = ""
     for trackno2, sectorno in badsectors:
@@ -230,6 +243,7 @@ for trackno in range(numtracks):
             s += " %02d" % sectorno
             
     if s != "":
-        print("track %3d: %s" % (trackno, s))
+        print("    track %3d: %s" % (trackno, s))
         
+print("bad tracks", sorted(badtracks))
         

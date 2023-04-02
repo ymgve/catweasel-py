@@ -15,12 +15,16 @@ while True:
         break
         
     trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
-    if trackmagic != 0xca:
-        raise Exception()
     trackdata = f.read(tsize)
     
-    #if target == -1 or trackno == target:
-    if trackno % 2 == 0:
+    # comment data
+    if trackmagic == 0:
+        continue
+        
+    if trackmagic != 0xca:
+        raise Exception()
+    
+    if target == trackno:
         print("----------- track", trackno)
         stats = [0] * 0x80
         for c in trackdata:

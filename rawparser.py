@@ -175,6 +175,20 @@ class TrackDecoder(object):
         else:
             if self.known_sectors[sectorno] != data:
                 self.debug(0, "mismatch between sector data at sector %d" % sectorno)
+                sector_a = self.known_sectors[sectorno]
+                sector_b = data
+                diff = ""
+                for i in range(512):
+                    if sector_a[i] != sector_b[i]:
+                        diff += "XX"
+                    else:
+                        diff += ".."
+                        
+                print("\n\n\n!!!!!!SECTOR MISMATCH sector %d" % sectorno)
+                for i in range(0, 512, 32):
+                    print(sector_a[i:i+32].hex(), sector_b[i:i+32].hex(), diff[i*2:i*2+64])
+                print("")
+                
                 
     def parse_dos_gap(self):
         self.debug(3, "found DOS gap")
@@ -304,6 +318,8 @@ class TrackDecoder(object):
             self.last_found = "dos_data"
 
             self.tracktype = "dos"
+            
+            self.debug(3, "got valid sector data sector %d" % sectorno)
 
     def parse_amiga_sector(self):
         self.debug(3, "found Amiga header")

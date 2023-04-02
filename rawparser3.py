@@ -393,6 +393,10 @@ class TrackDecoder(object):
         return self.tracktype, self.known_sectors
 
 def add_new_sector(known_sectors, trackno, sectorno, data):
+    if trackno not in known_sectors:
+        print("Track number outside known tracks!", trackno)
+        return
+        
     if sectorno not in known_sectors[trackno]:
         known_sectors[trackno][sectorno] = data
         #print("added sector", trackno, sectorno)
@@ -531,7 +535,7 @@ def parse_data(bs):
     
 
 luts = []
-dist = 10
+dist = 5
 for i in range(-dist, dist+1):
     for j in range(-dist, dist+1):
         lo = 0x22 + i
@@ -639,6 +643,8 @@ class Trackscan(object):
         self.trackdata = trackdata
         self.claimed_trackno = None
         self.claimed_sectorsize = None
+        self.positions = set()
+        self.found_data = {}
         
 
 if __name__ == "__main__":
@@ -646,7 +652,7 @@ if __name__ == "__main__":
     # known_data = set()
     # orphans = set()
 
-    target_sectors = 18
+    target_sectors = 9
     
     
     # if len(sys.argv) == 3:
@@ -661,6 +667,8 @@ if __name__ == "__main__":
         raise Exception("bad magic")
         
     scans = []
+    
+    maxtracks = 168
     
     while True:
         trackoffset = f.tell()
@@ -678,6 +686,17 @@ if __name__ == "__main__":
         if trackmagic != 0xca:
             raise Exception()
 
+        # skipping tracks 160+ for now
+        # TODO handle when sectors on tracks 160+ collide with sectors on tracks 159-
+        if trackno >= maxtracks:
+            continue
+            
+        # if trackno % 2 == 1:
+            # continue
+            
+        # if trackno != 0:
+            # continue
+
         scan = Trackscan(trackoffset, trackno, clock, flags, trackdata)
         
         scans.append(scan)
@@ -687,14 +706,34 @@ if __name__ == "__main__":
     # fast scan
     for scan in scans:
         # assume all track numbers are valid and ignore tracks based on that
-        if len(known_sectors[scan.trackno]) == target_sectors:
-            continue
+        # if len(known_sectors[scan.trackno]) == target_sectors:
+            # continue
 
         totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
         
         print("--------- scan level 1: track number %d file offset %x  total good sectors %d" % (scan.trackno, scan.trackoffset, totalsectors))
 
         scan.positions = find_dos_syncs_fast(scan.trackdata, baselut)
+        # print("number of syncs found", len(scan.positions))
+        # if len(scan.positions) < 30 and scan.trackno == 0:
+            # testlut = make_custom_track_lut(scan.trackdata)
+            # print(scan.positions)
+            # pos2 = find_dos_sync_deep(scan.trackdata)
+            # print(len(pos2))
+            # prevpos = 0
+            # for i in range(1, len(pos2)-1):
+                # startpos = pos2[i][0]+14
+                # endpos = pos2[i+1][0]
+                # segment = scan.trackdata[startpos:endpos]
+                
+                # print(pos2[i], len(segment))
+                # bs = Bitstream(segment, testlut)
+                # data = get_data(bs, 512, False)
+                # if data != None:
+                    # print(data.hex())
+                # else:
+                    # print("raw", segment[0:100].hex())
+            # exit()
         
         scan.found_data = {}
         
@@ -712,7 +751,7 @@ if __name__ == "__main__":
             sector_set = False
             
             want_sectordata = True
-            if currsector == None or currsector in known_sectors[scan.claimed_trackno]:
+            if currsector == None or (scan.claimed_trackno in known_sectors and currsector in known_sectors[scan.claimed_trackno]):
                 want_sectordata = False
             
             data = get_data(bs, scan.claimed_sectorsize, want_sectordata)
@@ -738,7 +777,8 @@ if __name__ == "__main__":
                             ok = False
 
                     if sectorno >= 30:
-                        print("sector number too large")
+                        if sectorno != 66:
+                            print("sector number too large", sectorno)
                         ok = False
                         
                     if ok:
@@ -759,6 +799,9 @@ if __name__ == "__main__":
                 elif data[0] == 0xfb:
                     if want_sectordata:
                         add_new_sector(known_sectors, scan.claimed_trackno, currsector, data[1:])
+                        if currsector + 1 > target_sectors:
+                            target_sectors = currsector + 1
+                            print("increasing targetsectors", target_sectors)
                         
                         scan.found_data[startpos] = ("data", len(segment))
                         added = True
@@ -779,8 +822,8 @@ if __name__ == "__main__":
 
     for scan in scans:
         # assume all track numbers are valid and ignore tracks based on that
-        if len(known_sectors[scan.trackno]) == target_sectors:
-            continue
+        # if len(known_sectors[scan.trackno]) == target_sectors:
+            # continue
 
         totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
         
@@ -827,7 +870,7 @@ if __name__ == "__main__":
             bs = Bitstream(segment, customlut)
             
             want_sectordata = True
-            if currsector == None or currsector in known_sectors[scan.claimed_trackno]:
+            if currsector == None or (scan.claimed_trackno in known_sectors and currsector in known_sectors[scan.claimed_trackno]):
                 want_sectordata = False
             
             data = get_data(bs, scan.claimed_sectorsize, want_sectordata)
@@ -853,7 +896,8 @@ if __name__ == "__main__":
                             ok = False
 
                     if sectorno >= 30:
-                        print("sector number too large")
+                        if sectorno != 66:
+                            print("sector number too large", sectorno)
                         ok = False
                         
                     if ok:
@@ -893,7 +937,7 @@ if __name__ == "__main__":
             if not sector_set:
                 currsector = None
     
-    for scan in scans:
+    for scan in scans[::-1]:
         # assume all track numbers are valid and ignore tracks based on that
         if len(known_sectors[scan.trackno]) == target_sectors:
             continue
@@ -961,7 +1005,8 @@ if __name__ == "__main__":
                             ok = False
 
                     if sectorno >= 30:
-                        print("sector number too large")
+                        if sectorno != 66:
+                            print("sector number too large", sectorno)
                         ok = False
                         
                     if ok:
@@ -992,13 +1037,29 @@ if __name__ == "__main__":
                 
             if not added:
                 scan.found_data[startpos] = ("unknown", len(segment))
-                
+
+if 0 in known_sectors and 0 in known_sectors[0]:
+    bootsector = known_sectors[0][0]
+    
+    bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
+        
+    print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
+    if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
+        print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
+        
+        
+highest_with_data = 0
+for trackno in range(0, maxtracks):
+    if trackno in known_sectors and len(known_sectors[trackno]) != 0:
+        highest_with_data = trackno
+        
 # if target_track == None:
 writecount = 0
-of2 = open(sys.argv[1] + ".img", "wb")
-for trackno in range(160):
+imgfilename = sys.argv[1] + ".img"
+of2 = open(imgfilename, "wb")
+for trackno in range(0, highest_with_data + 1):
     missings = []
-    for sectorno in range(18):
+    for sectorno in range(target_sectors):
         if trackno in known_sectors and sectorno in known_sectors[trackno]:
             of2.write(known_sectors[trackno][sectorno])
             writecount += 1
@@ -1007,10 +1068,9 @@ for trackno in range(160):
             missings.append(sectorno)
 
     if len(missings) != 0:
-        print("missing from track", trackno, ":", missings)
+        print("    missing from track", trackno, ":", missings)
         
 of2.close()    
 
-print("sectors written", writecount)
+print("    sectors written to %s: %d" % (imgfilename, writecount))
 
-# print("remaining orphans", orphans)

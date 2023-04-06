@@ -54,7 +54,7 @@ highest_with_data = 0
 
 
 clock = CW_TRACKINFO_CLOCK_14MHZ
-target_retry = 3
+target_retry = 10
 
 splits = (0x22, 0x2f)
 
@@ -67,8 +67,9 @@ tracktypecounts = {}
 
 allknown = {}
 tested_tracks = []
-for trackno in range(0, 168, 1):
-# for trackno in [98]:
+# for trackno in range(0, 168, 1):
+for trackno in [90, 93, 107, 109, 113, 127, 135, 139, 145, 151, 153, 155, 159]:
+# for trackno in range(167, -1, -1):
     known_sectors = {}
     
     retry = 0
@@ -198,7 +199,7 @@ for trackno in range(0, 168, 1):
     
     allknown[trackno] = known_sectors
     if len(known_sectors) > 0:
-        highest_with_data = trackno
+        highest_with_data = max(trackno, highest_with_data)
 
     tested_tracks.append(trackno)
     

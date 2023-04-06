@@ -15,11 +15,16 @@ while True:
         break
         
     trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
-    if trackmagic != 0xca:
-        raise Exception()
     trackdata = f.read(tsize)
     
+    if trackmagic == 0:
+        continue
+        
+    if trackmagic != 0xca:
+        raise Exception()
+        
     if trackno == target:
+        print("target")
         for n in trackdata:
             n = n & 0x7f
             dist1 = abs(n - 0x1b)

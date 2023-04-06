@@ -1,7 +1,20 @@
-import socket, struct, sys, os, time
+import argparse, socket, struct, sys, os, time
 
 import rawparser
 from current_drive_config import *
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("filename")
+parser.add_argument("-t", "--tracks")
+parser.add_argument("--rev", action="store_true")
+parser.add_argument("--odd", action="store_true")
+parser.add_argument("--even", action="store_true")
+
+parser.add_argument("-r", "--retries", type=int, default=10)
+
+args = parser.parse_args()
+
 
 CW_TRACKINFO_CLOCK_14MHZ = 0
 CW_TRACKINFO_CLOCK_28MHZ = 1
@@ -32,14 +45,13 @@ def recv_all(sc, size):
 sc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sc.connect(("192.168.0.46", 12322))
 
-filename = sys.argv[1]
 
-if not os.path.isfile(filename):
-    of = open(filename, "wb")
+if not os.path.isfile(args.filename):
+    of = open(args.filename, "wb")
     of.write(headermagic)
     
 else:
-    of = open(filename, "ab")
+    of = open(args.filename, "ab")
 
 
 # dummy track to contain metadata about the current dump
@@ -52,9 +64,8 @@ of.write(header + data)
 highest_sector = 8
 highest_with_data = 0
 
-
 clock = CW_TRACKINFO_CLOCK_14MHZ
-target_retry = 10
+target_retry = args.retries
 
 splits = (0x22, 0x2f)
 
@@ -67,9 +78,27 @@ tracktypecounts = {}
 
 allknown = {}
 tested_tracks = []
-# for trackno in range(0, 168, 1):
-for trackno in [90, 93, 107, 109, 113, 127, 135, 139, 145, 151, 153, 155, 159]:
-# for trackno in range(167, -1, -1):
+
+if args.tracks:
+    if "-" in args.tracks:
+        start, end = args.tracks.split("-")
+        target_tracks = list(range(int(start), int(end)+1))
+        
+    else:
+        target_tracks = [int(x) for x in args.tracks.split(",")]
+        
+else:
+    if args.even:
+        target_tracks = list(range(0, 168, 2))
+    elif args.odd:
+        target_tracks = list(range(1, 168, 2))
+    else:
+        target_tracks = list(range(0, 168, 1))
+        
+if args.rev:
+    target_tracks = target_tracks[::-1]
+    
+for trackno in target_tracks:
     known_sectors = {}
     
     retry = 0
@@ -210,7 +239,7 @@ badtracks = set()
 goodcount = 0
 numtracks = highest_with_data + 1
 
-of2 = open(filename + ".img", "wb")
+of2 = open(args.filename + ".img", "wb")
 for trackno in tested_tracks:
     if trackno <= highest_with_data:
         for sectorno in range(highest_sector + 1):
@@ -223,7 +252,7 @@ for trackno in tested_tracks:
                 badtracks.add(trackno)
 of2.close()
 
-print(filename)
+print(args.filename)
 
 if "dos" in tracktypecounts and 0 in allknown and 0 in allknown[0]:
     bootsector = allknown[0][0]
@@ -246,5 +275,5 @@ for trackno in range(numtracks):
     if s != "":
         print("    track %3d: %s" % (trackno, s))
         
-print("bad tracks", sorted(badtracks))
+print("bad tracks", ",".join([str(x) for x in sorted(badtracks)]))
         

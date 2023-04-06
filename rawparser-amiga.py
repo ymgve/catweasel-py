@@ -360,7 +360,7 @@ def add_new_sector(known_sectors, trackno, sectorno, data):
             for i in range(0, 512, 32):
                 print(sector_a[i:i+32].hex(), sector_b[i:i+32].hex(), diff[i*2:i*2+64])
             print("")
-            exit()
+            #exit()
             
         #else:
             #print("dupe sector", trackno, sectorno)
@@ -393,7 +393,7 @@ def add_new_sectors(known_sectors, trackno, new_sectors):
     return added
     
 def find_amiga_syncs_fast(trackdata, splitlut):
-    trackdata2 = bytes(splitlut[x] for x in trackdata)
+    trackdata2 = bytes(splitlut[x][0] for x in trackdata)
     
     syncmark = bytes((8, 4, 8, 4, 2, 8, 4, 8, 4))
     
@@ -428,16 +428,25 @@ def find_amiga_sync_deep(trackdata):
 def make_lut(lo, hi):
     splitlut = [0] * 256
     for i in range(0, lo):
-        splitlut[i] = 2
-        splitlut[i+0x80] = 2
+        skew = (i - 0x1b) // 2
+        if skew < -8:
+            skew = -8
+            
+        splitlut[i] = (2, skew)
+        splitlut[i+0x80] = (2, skew)
         
     for i in range(lo, hi):
-        splitlut[i] = 4
-        splitlut[i+0x80] = 4
+        skew = (i - 0x2a) // 2
+        splitlut[i] = (4, skew)
+        splitlut[i+0x80] = (4, skew)
         
     for i in range(hi, 0x80):
-        splitlut[i] = 8
-        splitlut[i+0x80] = 8
+        skew = (i - 0x38) // 2
+        if skew > 8:
+            skew = 8
+            
+        splitlut[i] = (8, skew)
+        splitlut[i+0x80] = (8, skew)
         
     return splitlut
 
@@ -487,7 +496,7 @@ def parse_amiga_sector(bs, known_sectors=[]):
     for i in range(12):
         rawres, missing_syncs = getamigaword(bs)
         if rawres == None or missing_syncs != 0:
-            print("bad header data")
+            #print("bad header data")
             return None, None
             
         words.append(rawres)
@@ -495,7 +504,7 @@ def parse_amiga_sector(bs, known_sectors=[]):
         
     csum &= 0x55555555
     if csum != 0:
-        print("bad Amiga header checksum", hex(csum))
+        #print("bad Amiga header checksum", hex(csum))
         return None, None
         
     #print("OK Amiga header checksum")
@@ -540,13 +549,13 @@ def parse_amiga_sector(bs, known_sectors=[]):
     csum = 0
     for i in range(258):
         rawres, missing_syncs = getamigaword(bs)
-        # if rawres == None or missing_syncs != 0:
-            # print("bad sector data", i, bs.index, rawres, missing_syncs)
-            # return header, None
-
-        if rawres == None:
-            print("bad sector data", i, rawres, missing_syncs)
+        if rawres == None or missing_syncs != 0:
+            #print("bad sector data", i, bs.index, rawres, missing_syncs)
             return header, None
+
+        # if rawres == None:
+            # print("bad sector data", i, rawres, missing_syncs)
+            # return header, None
             
         # if missing_syncs != 0:
             # print("bad sector data", i, trackno, sectorno, bs.index, hex(rawres), missing_syncs)
@@ -557,7 +566,7 @@ def parse_amiga_sector(bs, known_sectors=[]):
         
     csum &= 0x55555555
     if csum != 0:
-        print("bad data crc", sectorno, hex(csum))
+        #print("bad data crc", sectorno, hex(csum))
         return header, None
         
     data = bytearray()
@@ -581,12 +590,13 @@ for i in range(-dist, dist+1):
             
         lut = make_lut(lo, hi)
     
-        luts.append((abs(i) + abs(j), lo, hi, lut))
+        luts.append((abs(i) + abs(j), lo, hi, lut, False))
+        luts.append((abs(i) + abs(j), lo, hi, lut, True))
         
 luts.sort()
 
 baselut = luts[0][3]
-luts = luts[1:]
+luts = luts[2:]
 
 def decode_parts(parts, lut):
     parsed = []
@@ -749,7 +759,7 @@ if __name__ == "__main__":
         
     scans = []
     
-    maxtracks = 160
+    maxtracks = 168
     
     while True:
         trackoffset = f.tell()
@@ -787,8 +797,8 @@ if __name__ == "__main__":
     # fast scan
     for scan in scans:
         # assume all track numbers are valid and ignore tracks based on that
-        # if len(known_sectors[scan.trackno]) == target_sectors:
-            # continue
+        if len(known_sectors[scan.trackno]) == target_sectors:
+            continue
 
         totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
         
@@ -802,28 +812,34 @@ if __name__ == "__main__":
             startpos = syncpos+9
             endpos = poslist[pos+1]
             segment = scan.trackdata[startpos:endpos]
-            segment = tryfix(segment)
-            bs = Bitstream(segment, baselut)
-            
             tag = None
+                
+            for use_skew in (True, False):
+                bs = Bitstream(segment, baselut, use_skew)
             
-            header, data = parse_amiga_sector(bs)
-            if header != None:
-                vtrackno, sectorno, until_end, sector_label = header
-                if vtrackno != scan.trackno:
-                    print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno)
-                else:
-                    if data != None:
-                        add_new_sector(known_sectors, scan.trackno, sectorno, data)
-                        tag = "data"
+                header, data = parse_amiga_sector(bs)
+                if header != None:
+                    vtrackno, sectorno, until_end, sector_label = header
+                    if vtrackno != scan.trackno:
+                        print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno, sectorno)
+                        if data != None:
+                            print("ADDING ANYWAY")
+                            add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                            tag = "data"
                     else:
-                        print("bad data", sectorno)
-                        #print_dists(segment)
+                        if data != None:
+                            add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                            tag = "data"
+                            
+                        # open("_segments_to_test.bin", "ab").write(struct.pack("<IIII", scan.trackno, vtrackno, sectorno, len(segment)) + segment)
                         
+                if tag != None:
+                    break
+                            
             if tag != None:
                 scan.found_data[syncpos] = tag
         
-    if False:
+    if True:
         for scan in scans:
             # assume all track numbers are valid and ignore tracks based on that
             if len(known_sectors[scan.trackno]) == target_sectors:
@@ -853,24 +869,34 @@ if __name__ == "__main__":
                 startpos = syncpos+9
                 endpos = poslist[pos+1]
                 segment = scan.trackdata[startpos:endpos]
-                bs = Bitstream(segment, customlut)
                 
                 tag = None
                 
-                header, data = parse_amiga_sector(bs)
-                if header != None:
-                    vtrackno, sectorno, until_end, sector_label = header
-                    if vtrackno != scan.trackno:
-                        print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno)
-                    else:
-                        if data != None:
-                            add_new_sector(known_sectors, scan.trackno, sectorno, data)
-                            tag = "data"
+                for use_skew in (True, False):
+                    bs = Bitstream(segment, customlut, use_skew)
+                    
+                    header, data = parse_amiga_sector(bs)
+                    if header != None:
+                        vtrackno, sectorno, until_end, sector_label = header
+                        if vtrackno != scan.trackno:
+                            print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno, sectorno)
+                            if data != None:
+                                print("ADDING ANYWAY")
+                                add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                                tag = "data"
+                        else:
+                            if data != None:
+                                add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                                tag = "data"
+
+                    if tag != None:
+                        break
 
                 if tag != None:
                     scan.found_data[syncpos] = tag
 
-        for scan in scans:
+    if True:
+        for scan in scans[::-1]:
             # assume all track numbers are valid and ignore tracks based on that
             if len(known_sectors[scan.trackno]) == target_sectors:
                 continue
@@ -888,9 +914,9 @@ if __name__ == "__main__":
                 #print("pos, score", syncpos, score)
                 noheader = True
                 startpos = syncpos + 9
-                for dist, lo, hi, lut in luts:
+                for dist, lo, hi, lut, use_skew in luts:
                     segment = scan.trackdata[startpos:]
-                    bs = Bitstream(segment, lut)
+                    bs = Bitstream(segment, lut, use_skew)
                     header, data = parse_amiga_sector(bs, known_sectors[scan.trackno])
                     if header != None:
                         noheader = False
@@ -900,7 +926,7 @@ if __name__ == "__main__":
                         else:
                             vtrackno, sectorno, until_end, sector_label = header
                             if vtrackno != scan.trackno:
-                                print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno)
+                                print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno, sectorno)
                             else:
                                 if data != None:
                                     res = add_new_sector(known_sectors, scan.trackno, sectorno, data)
@@ -908,7 +934,7 @@ if __name__ == "__main__":
                                         print("added header and data at candidate position", syncpos, score, "dist", dist, header)
                                         
                                     break
-                                    
+                                        
                                 
                 if noheader:
                     print("failed to find header at pos with score", syncpos, score)
@@ -944,14 +970,14 @@ if __name__ == "__main__":
                             # add_new_sector(known_sectors, scan.trackno, sectorno, data)
                             
                         
-    if 0 in known_sectors and 0 in known_sectors[0]:
-        bootsector = known_sectors[0][0]
+    # if 0 in known_sectors and 0 in known_sectors[0]:
+        # bootsector = known_sectors[0][0]
         
-        bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
+        # bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
             
-        print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
-        if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
-            print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
+        # print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
+        # if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
+            # print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
             
             
     highest_with_data = 0

@@ -787,8 +787,8 @@ if __name__ == "__main__":
     # fast scan
     for scan in scans:
         # assume all track numbers are valid and ignore tracks based on that
-        # if len(known_sectors[scan.trackno]) == target_sectors:
-            # continue
+        if len(known_sectors[scan.trackno]) == target_sectors:
+            continue
 
         totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
         
@@ -823,7 +823,7 @@ if __name__ == "__main__":
             if tag != None:
                 scan.found_data[syncpos] = tag
         
-    if False:
+    if True:
         for scan in scans:
             # assume all track numbers are valid and ignore tracks based on that
             if len(known_sectors[scan.trackno]) == target_sectors:
@@ -853,6 +853,7 @@ if __name__ == "__main__":
                 startpos = syncpos+9
                 endpos = poslist[pos+1]
                 segment = scan.trackdata[startpos:endpos]
+                segment = tryfix(segment)
                 bs = Bitstream(segment, customlut)
                 
                 tag = None
@@ -866,10 +867,13 @@ if __name__ == "__main__":
                         if data != None:
                             add_new_sector(known_sectors, scan.trackno, sectorno, data)
                             tag = "data"
+                        else:
+                            print("bad data", sectorno)
 
                 if tag != None:
                     scan.found_data[syncpos] = tag
 
+    if False:
         for scan in scans:
             # assume all track numbers are valid and ignore tracks based on that
             if len(known_sectors[scan.trackno]) == target_sectors:

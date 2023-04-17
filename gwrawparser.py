@@ -1,4 +1,4 @@
-import io, struct, sys
+import io, struct, sys, argparse
 
 width = 30
 mfmdd_drivestats = [-2] * 1024
@@ -372,33 +372,40 @@ def parse_amiga_sector(bs):
         
     return header, data
     
+# 1 data OK
+# -1 CRC error
+# -2 undersized/corrupted data
 
 def get_data(bs, sectorsize, want_sectordata=True):
     res, missyncs = getbytes(bs, 7)
     if missyncs == 0 and len(res) == 7:
         if res[0] == 0xfe:
             if crc16(b"\xa1\xa1\xa1" + res) == 0:
-                return res[:-2]
+                return 1, res[:-2]
+            else:    
+                return -1, res
                 
         elif res[0] == 0xfb:
             if want_sectordata:
                 res2, missyncs = getbytes(bs, sectorsize - 4)
-                if missyncs == 0 and len(res2) == sectorsize - 4 and crc16(b"\xa1\xa1\xa1" + res + res2) == 0:
-                    data = res + res2[:-2]
-                    return data
+                if missyncs == 0 and len(res2) == sectorsize - 4:
+                    if crc16(b"\xa1\xa1\xa1" + res + res2) == 0:
+                        return 1, res + res2[:-2]
+                    else:
+                        return -1, res + res2
+                else:
+                    return -2, res + res2
                     
             else:
-                return res
+                return 1, res
                 
-    return None
+    return -2, res
     
     
-def find_dos_syncs_fast(trackdata, splitlut):
-    trackdata2 = bytes(splitlut[x] for x in trackdata)
-    
+def find_dos_syncs_fast(trackdata2):
     syncmark = bytes((8, 4, 8, 4, 2, 8, 4, 8, 4, 2, 8, 4, 8, 4))
     
-    positions = []
+    syncs = []
     
     pos = -1
     while True:
@@ -407,16 +414,14 @@ def find_dos_syncs_fast(trackdata, splitlut):
         except ValueError:
             break
             
-        positions.append(pos)
+        syncs.append(pos)
         
-    return set(positions)
+    return syncs
 
-def find_amiga_syncs_fast(trackdata, splitlut):
-    trackdata2 = bytes(splitlut[x] for x in trackdata)
-    
+def find_amiga_syncs_fast(trackdata2):
     syncmark = bytes((8, 4, 8, 4, 2, 8, 4, 8, 4))
     
-    positions = []
+    syncs = []
     
     pos = -1
     while True:
@@ -425,28 +430,29 @@ def find_amiga_syncs_fast(trackdata, splitlut):
         except ValueError:
             break
             
-        positions.append(pos)
+        syncs.append(pos)
         
-    return set(positions)
+    return syncs
     
-def quick_scan_dos(trackdata, syncs, lut, use_skew=False):
-    known_sectors = {}
-    found_data = {}
-    
-    syncs = sorted(syncs)
+def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_skew=False):
+    syncs = sorted(rawtrack.syncs)
     
     # map out headers and candidate data
     for idx in range(len(syncs)-1):
         startpos = syncs[idx]+14
         endpos = syncs[idx+1]
-        segment = trackdata[startpos:endpos]
+        
+        if startpos in rawtrack.found_data:
+            continue
+            
+        segment = rawtrack.trackdata[startpos:endpos]
         if not use_skew:
             bs = Bitstream(segment, lut)
         else:
             bs = Bitstream_skew(segment, lut)
         
-        data = get_data(bs, 0, False) # only want first bytes of data right now
-        if data != None:
+        res, data = get_data(bs, 0, False) # only want first bytes of data right now
+        if res == 1:
             if data[0] == 0xfe:
                 cyl, side, rawsectorno, sectorsizebits = struct.unpack("<BBBB", data[1:5])
                 htrackno = side + cyl * 2
@@ -457,70 +463,68 @@ def quick_scan_dos(trackdata, syncs, lut, use_skew=False):
                 ok = True
         
                 if side not in (0, 1):
-                    print("side not 0 or 1")
+                    print("header side not 0 or 1!!!")
                     ok = False
                     
-                if rawsectorno >= 30:
-                    if rawsectorno != 66:
-                        print("raw sector number too large", rawsectorno)
-                    ok = False
+                #if rawsectorno >= 30:
+                    #if rawsectorno != 66:
+                    #print("raw sector number too large", rawsectorno)
+                    #ok = False
                     
                 if ok:
-                    found_data[startpos] = ("header", htrackno, rawsectorno - 1, sectorsize)
+                    rawtrack.found_data[startpos] = ["header", htrackno, rawsectorno - 1, sectorsize]
                 
             elif data[0] == 0xfb:
-                found_data[startpos] = ("datastub",)
+                rawtrack.found_data[startpos] = ["datastub",]
                 
     for idx in range(len(syncs)-1):
         startpos = syncs[idx]+14
         endpos = syncs[idx+1]
         
-        if startpos in found_data and found_data[startpos][0] == "header":
-            _, htrackno, sectorno, sectorsize = found_data[startpos]
+        if startpos in rawtrack.found_data and rawtrack.found_data[startpos][0] == "header":
+            _, htrackno, sectorno, sectorsize = rawtrack.found_data[startpos]
             startpos2 = syncs[idx+1]+14
-            if startpos2 in found_data and found_data[startpos2][0] == "datastub":
+            if startpos2 in rawtrack.found_data and rawtrack.found_data[startpos2][0] == "datastub":
                 distance = startpos2 - startpos
                 if distance < 500:
                     if distance > 350:
                         print("unusually long distance between header and data?", distance, sectorno)
                         
-                    segment = trackdata[startpos2:]
+                    segment = rawtrack.trackdata[startpos2:]
                     if not use_skew:
                         bs = Bitstream(segment, lut)
                     else:
                         bs = Bitstream_skew(segment, lut)
 
-                    data = get_data(bs, sectorsize, True)
-                    if data != None:
+                    res, data = get_data(bs, sectorsize, True)
+                    if res == 1:
                         if data[0] != 0xfb:
                             raise Exception("WTF?!?!")
                             
                         data = data[1:]
                         
-                        ts = (htrackno, sectorno)
-                        if ts not in known_sectors:
-                            known_sectors[ts] = data
-                        else:
-                            if known_sectors[ts] != data:
-                                print("SECTOR MISMATCH!")
-                                compare_sectors(known_sectors[ts], data)
-
-                        found_data[startpos2] = ("data",)
+                        rawtrack.found_data[startpos][0] = "usedheader"
+                        rawtrack.found_data[startpos2][0] = "data"
                         
-                        if sectorsize != 512:
-                            print("Added sector %d,%d with nonstandard sectorsize %d" % (htrackno, sectorno, sectorsize))
-                         
-    return known_sectors
+                        sec = Sector(htrackno, sectorno, sectorsize, quality, sourcefunc, rawtrack, startpos, data)
+                        if rawtrack.add_sector(sec):
+                            new_sectors.append(sec)
+                    else:
+                        # handle broken sector here, with logging or something
+                        pass
 
-def quick_scan_amiga(trackdata, syncs, lut, use_skew=False):
-    known_sectors = {}
 
-    syncs = sorted(syncs)
+def quick_scan_amiga(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_skew=False):
+    syncs = sorted(rawtrack.syncs)
+    
     for idx in range(len(syncs)-1):
-        syncpos = syncs[idx]
-        startpos = syncpos+9
+        startpos = syncs[idx]+9
         endpos = syncs[idx+1]
-        segment = trackdata[startpos:endpos]
+        
+        if startpos in rawtrack.found_data:
+            continue
+            
+        segment = rawtrack.trackdata[startpos:endpos]
             
         if not use_skew:
             bs = Bitstream(segment, lut)
@@ -531,26 +535,78 @@ def quick_scan_amiga(trackdata, syncs, lut, use_skew=False):
         if header != None:
             htrackno, sectorno, until_end, sector_label = header
             if data != None:
-                ts = (htrackno, sectorno)
-                if ts not in known_sectors:
-                    known_sectors[ts] = data
-                else:
-                    if known_sectors[ts] != data:
-                        print("SECTOR MISMATCH!")
-                        compare_sectors(known_sectors[ts], data)
+                sec = Sector(htrackno, sectorno, 512, quality, sourcefunc, rawtrack, startpos, data)
+                if rawtrack.add_sector(sec):
+                    new_sectors.append(sec)
 
-    return known_sectors
     
-def quick_scan_track(trackdata):
-    syncs = find_dos_syncs_fast(trackdata, mfmdd_lut)
-    if len(syncs) != 0:
-        return "dos", quick_scan_dos(trackdata, syncs, mfmdd_lut), len(syncs)
+def quick_scan_track(args, rawtrack):
+    new_sectors = []
+    
+    if args.hd:
+        lut = mfmhd_lut
+    else:
+        lut = mfmdd_lut
         
-    syncs = find_amiga_syncs_fast(trackdata, mfmdd_lut)
-    if len(syncs) != 0:
-        return "amiga", quick_scan_amiga(trackdata, syncs, mfmdd_lut), len(syncs)
+    trackdata2 = bytes(lut[x] for x in rawtrack.trackdata)
+    
+    syncs = find_dos_syncs_fast(trackdata2)
+    rawtrack.add_syncs(syncs, "dos")
+    if rawtrack.has_syncs("dos"):
+        quick_scan_dos(args, rawtrack, new_sectors, lut, 1, "quick_dos_standardlut")
         
-    return "unknown", [], 0
+    syncs = find_amiga_syncs_fast(trackdata2)
+    rawtrack.add_syncs(syncs, "amiga")
+    if rawtrack.has_syncs("amiga"):
+        quick_scan_amiga(args, rawtrack, new_sectors, lut, 1, "quick_amiga_standardlut")
+        
+    return new_sectors
+
+def quick_scan_track_customlut(args, rawtrack):
+    new_sectors = []
+    
+    if args.hd:
+        raise Exception("not supported yet")
+    else:
+        lut = make_lut(rawtrack.trackdata)
+        
+    trackdata2 = bytes(lut[x] for x in rawtrack.trackdata)
+    
+    syncs = find_dos_syncs_fast(trackdata2)
+    rawtrack.add_syncs(syncs, "dos")
+    if rawtrack.has_syncs("dos"):
+        quick_scan_dos(args, rawtrack, new_sectors, lut, 2, "quick_dos_customlut")
+        
+    syncs = find_amiga_syncs_fast(trackdata2)
+    rawtrack.add_syncs(syncs, "amiga")
+    if rawtrack.has_syncs("amiga"):
+        quick_scan_amiga(args, rawtrack, new_sectors, lut, 2, "quick_amiga_customlut")
+        
+    return new_sectors
+
+def quick_scan_track_skew(args, rawtrack):
+    new_sectors = []
+    
+    if args.hd:
+        raise Exception()
+    else:
+        lut = mfmdd_lut
+        
+    trackdata2 = bytes(lut[x] for x in rawtrack.trackdata)
+    
+    syncs = find_dos_syncs_fast(trackdata2)
+    rawtrack.add_syncs(syncs, "dos")
+    if rawtrack.has_syncs("dos"):
+        quick_scan_dos(args, rawtrack, new_sectors, mfmdd_lut2, 3, "quick_dos_skew", True)
+        
+    syncs = find_amiga_syncs_fast(trackdata2)
+    rawtrack.add_syncs(syncs, "amiga")
+    if rawtrack.has_syncs("amiga"):
+        quick_scan_amiga(args, rawtrack, new_sectors, mfmdd_lut2, 3, "quick_amiga_skew", True)
+        
+        
+    return new_sectors
+
 
 def quick_scan_hd_track(trackdata):
     syncs = find_dos_syncs_fast(trackdata, mfmhd_lut)
@@ -589,147 +645,291 @@ def deeper_scan_hd_track(trackdata):
         
     return "unknown", [], 0
     
-def main():
-    known_sectors = {}
-    
-    highest_sector = 8
-    highest_with_data = 0
-    
-    f = open(sys.argv[1], "rb")
-
-    magic = f.read(32)
-    if magic != b"gwreader raw data".ljust(32, b"\x00"):
-        raise Exception("bad magic")
+class Sector:
+    def __init__(self, htrackno, sectorno, sectorsize, quality, sourcefunc, rawtrack, position, data):
+        self.htrackno = htrackno
+        self.sectorno = sectorno
+        self.sectorsize = sectorsize
+        self.quality = quality
+        self.sourcefunc = sourcefunc
+        self.rawtrack = rawtrack
+        self.position = position # this is the position of the header preceding the data
+        self.data = data
         
-    while True:
-        trackoffset = f.tell()
-        datatype = f.read(1)
-        if len(datatype) == 0:
-            break
-            
-        if datatype == b"\x00":
-            sz = struct.unpack("<I", f.read(4))[0]
-            comment = f.read(sz)
-            #print("comment:", comment)
-            
-        elif datatype != b"\xca":
-            raise Exception()
+class RawTrack:
+    def __init__(self, filename, trackoffset, trackno, trackdata):
+        self.filename = filename
+        self.trackoffset = trackoffset
+        self.trackno = trackno
+        self.trackdata = trackdata
+        self.syncs = {}
+        self.found_data = {}
+        self.known_sectors = {}
+        
+    def add_syncs(self, syncs, synctype):
+        new_syncs = False
+        for syncpos in syncs:
+            if syncpos not in self.syncs:
+                self.syncs[syncpos] = synctype
+                new_syncs = True
+            else:
+                if self.syncs[syncpos] == "amiga" and synctype == "dos":
+                    # we found a longer DOS sync as a subset of an Amiga sync, override it
+                    self.syncs[syncpos] = synctype
+                    new_syncs = True
+                    
+        return new_syncs
+        
+    def has_syncs(self, synctype):
+        for syncpos in self.syncs:
+            if self.syncs[syncpos] == synctype:
+                return True
+                
+        return False
+        
+    def add_sector(self, sec):
+        ts = (sec.htrackno, sec.sectorno)
+        if ts not in self.known_sectors:
+            if sec.sectorno >= 30:
+                print("sector with too large sector number!!!!!!!!!", sec.sectorno)
+                return False
+                
+            if sec.sectorsize != 512:
+                print("Added sector %d,%d with nonstandard sectorsize %d" % (sec.htrackno, sec.sectorno, sec.sectorsize))
+
+            if sec.htrackno != self.trackno:
+                print("Mismatch between rawtrack trackno %d and header trackno %d" % (self.trackno, sec.htrackno))
+                
+            self.known_sectors[ts] = sec
+            return True
             
         else:
-            trackno, indexsize, fluxsize = struct.unpack("<BII", f.read(9))
-            f.read(indexsize)
+            if self.known_sectors[ts].data != sec.data:
+                print("SECTOR MISMATCH INSIDE RAW TRACK trackno %d htrackno %d sector %d" % (self.trackno, sec.htrackno, sec.sectorno))
+                compare_sectors(self.known_sectors[ts].data, sec.data)
+                if self.known_sectors[ts].quality > sec.quality:
+                    print("USING NEW SECTOR BECAUSE OF QUALITY")
+                    self.known_sectors[ts] = sec
+                    return True
+
+        return False
+
+def gather_rawtracks(args, target_tracks):
+    rawtracks = []
+    
+    for filename in args.filenames:
+        f = open(filename, "rb")
+
+        magic = f.read(32)
+        if magic != b"gwreader raw data".ljust(32, b"\x00"):
+            raise Exception("bad magic")
             
-            fluxdata = f.read(fluxsize)
-
-            if "even" in sys.argv and trackno % 2 != 0:
-                continue
+        while True:
+            trackoffset = f.tell()
+            datatype = f.read(1)
+            if len(datatype) == 0:
+                break
                 
-            bio = io.BytesIO(fluxdata)
-            trackdata = []
-            while True:
-                b = bio.read(2)
-                if len(b) == 0:
-                    break
-                    
-                flux = struct.unpack("<H", b)[0]
-                if flux == 0xffff:
-                    flux = struct.unpack("<Q", bio.read(8))[0]
-                trackdata.append(flux)
-
-            trackdata = [min(x, 1023) for x in trackdata]
-
-            totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
-            
-            print("--------- track number %d file offset %x  total good sectors %d" % (trackno, trackoffset, totalsectors))
-
-            if trackno not in known_sectors:
-                known_sectors[trackno] = {}
+            if datatype == b"\x00":
+                sz = struct.unpack("<I", f.read(4))[0]
+                comment = f.read(sz)
                 
-            if "hd" in sys.argv:
-                tracktype, new_sectors, synccount = quick_scan_hd_track(trackdata)
-                tracktype2, new_sectors2, synccount2 = deeper_scan_hd_track(trackdata)
+            elif datatype != b"\xca":
+                raise Exception()
+                
             else:
-                tracktype, new_sectors, synccount = quick_scan_track(trackdata)
-                tracktype2, new_sectors2, synccount2 = deeper_scan_track(trackdata)
-            
-            if len(new_sectors) + len(new_sectors2) > 0:
-                if len(new_sectors) > len(new_sectors2):
-                    print("quick scan wins!  quick %2d  deep %2d" % (len(new_sectors), len(new_sectors2)))
-                    
-                elif len(new_sectors) < len(new_sectors2):
-                    print("deeper scan wins! quick %2d  deep %2d" % (len(new_sectors), len(new_sectors2)))
-                    
-            if len(new_sectors) > 0 or len(new_sectors2) > 0:
-                highest_with_data = max(highest_with_data, trackno)
-                
-            for ts in new_sectors:
-                htrackno, sectorno = ts
-                if htrackno != trackno:
-                    print("sector %d on wrong track, claims %d but should be %d" % (sectorno, htrackno, trackno))
-                    print("adding anyway!")
-                    
-                if sectorno not in known_sectors[trackno]:
-                    known_sectors[trackno][sectorno] = new_sectors[ts]
-                else:
-                    if known_sectors[trackno][sectorno] != new_sectors[ts]:
-                        #raise Exception("MISMATCHING SECTORS")
-                        print("SECTOR MISMATCH", trackno, sectorno)
-                        compare_sectors(known_sectors[trackno][sectorno], new_sectors[ts])
-                        # use the quick scan one?
-                        known_sectors[trackno][sectorno] = new_sectors[ts]
-                        
-                if trackno < 160:
-                    highest_sector = max(highest_sector, sectorno)
+                trackno, indexsize, fluxsize = struct.unpack("<BII", f.read(9))
+                f.read(indexsize) # ignore indexes for now
+                fluxdata = f.read(fluxsize)
 
-            for ts in new_sectors2:
-                htrackno, sectorno = ts
-                if htrackno != trackno:
-                    print("sector %d on wrong track, claims %d but should be %d" % (sectorno, htrackno, trackno))
-                    print("adding anyway!")
+                if trackno in target_tracks:
+                    bio = io.BytesIO(fluxdata)
+                    trackdata = []
+                    while True:
+                        b = bio.read(2)
+                        if len(b) == 0:
+                            break
+                            
+                        flux = struct.unpack("<H", b)[0]
+                        if flux == 0xffff:
+                            flux = struct.unpack("<Q", bio.read(8))[0]
+                        trackdata.append(flux)
+
+                    trackdata = [min(x, 1023) for x in trackdata]
                     
-                if sectorno not in known_sectors[trackno]:
-                    known_sectors[trackno][sectorno] = new_sectors2[ts]
-                    print("Added another sector from deeper scan!", trackno, sectorno)
-                else:
-                    if known_sectors[trackno][sectorno] != new_sectors2[ts]:
-                        #raise Exception("MISMATCHING SECTORS")
-                        print("SECTOR MISMATCH", trackno, sectorno)
-                        compare_sectors(known_sectors[trackno][sectorno], new_sectors2[ts])
-                        
-                if trackno < 160:
-                    highest_sector = max(highest_sector, sectorno)
-                     
-    if 0 in known_sectors and 0 in known_sectors[0]:
-        bootsector = known_sectors[0][0]
+                    rt = RawTrack(filename, trackoffset, trackno, trackdata)
+                    rawtracks.append(rt)
+                
+                
+    return rawtracks
+
+def process_tracks(args, rawtracks, known_sectors, scanner_func):
+    for rawtrack in rawtracks:
+        new_sectors = scanner_func(args, rawtrack)
         
-        bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
-            
-        print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
-        if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
-            print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
-            
-    writecount = 0
-    imgfilename = sys.argv[1] + ".img"
-    of2 = open(imgfilename, "wb")
-    for trackno in range(0, highest_with_data + 1):
-        if "even" in sys.argv and trackno % 2 == 1:
-            continue
-            
-        missings = []
-        for sectorno in range(highest_sector + 1):
-            if trackno in known_sectors and sectorno in known_sectors[trackno]:
-                of2.write(known_sectors[trackno][sectorno])
-                writecount += 1
+        added = 0
+        
+        for sec in new_sectors:
+            ts = (sec.htrackno, sec.sectorno)
+            if ts not in known_sectors:
+                if sec.htrackno != rawtrack.trackno:
+                    if not args.ignoreht:
+                        continue
+                        
+                    print("adding sector htrack %d sector %d even though it's actually on track %d" % (sec.htrackno, sec.sectorno, rawtrack.trackno))
+                 
+                known_sectors[ts] = sec
+                added += 1
             else:
-                of2.write(b"CWTOOLBADSECTOR!" * 32)
-                missings.append(sectorno)
+                if known_sectors[ts].data != sec.data:
+                    print("SECTOR MISMATCH trackno %d htrackno %d sector %d" % (rawtrack.trackno, sec.htrackno, sec.sectorno))
+                    compare_sectors(known_sectors[ts].data, sec.data)
+                    if known_sectors[ts].quality > sec.quality:
+                        print("USING NEW SECTOR BECAUSE OF QUALITY")
+                        known_sectors[ts] = sec
+                        return True
+        if added > 0:
+            print("got %d new sectors after processing track %d, now in total %d" % (added, rawtrack.trackno, len(known_sectors)))
+        
+        
+def main():
+    parser = argparse. ArgumentParser()
+    parser.add_argument("filenames", nargs="+")
 
-        if len(missings) != 0:
-            print("    missing from track", trackno, ":", missings)
+    parser.add_argument("-t", "--tracks")
+    parser.add_argument("--odd", action="store_true")
+    parser.add_argument("--even", action="store_true")
+
+    parser.add_argument("--nsectors", type=int, default=1)
+    parser.add_argument("--hd", action="store_true")
+    parser.add_argument("--ignoreht", action="store_true")
+    
+    args = parser.parse_args()
+    
+    if args.tracks:
+        if "-" in args.tracks:
+            start, end = args.tracks.split("-")
+            target_tracks = set(range(int(start), int(end)+1))
             
-    of2.close()    
+        else:
+            target_tracks = set([int(x) for x in args.tracks.split(",")])
+            
+    else:
+        if args.even:
+            target_tracks = set(range(0, 168, 2))
+        elif args.odd:
+            target_tracks = set(range(1, 168, 2))
+        else:
+            target_tracks = set(range(0, 168, 1))
+            
+            
+    rawtracks = gather_rawtracks(args, target_tracks)
+    
+    known_sectors = {}
+    
+    print("starting normal scan")
+    process_tracks(args, rawtracks, known_sectors, quick_scan_track)
+    
+    print("starting custom lut scan")
+    process_tracks(args, rawtracks, known_sectors, quick_scan_track_customlut)
+    
+    print("starting skew lut scan")
+    process_tracks(args, rawtracks, known_sectors, quick_scan_track_skew)
+    
+    
+    exit()
+            # totalsectors = sum([len(known_sectors[x]) for x in known_sectors])
+            
+            # print("--------- track number %d file offset %x  total good sectors %d" % (trackno, trackoffset, totalsectors))
 
-    print("    sectors written to %s: %d" % (imgfilename, writecount))
+            # if trackno not in known_sectors:
+                # known_sectors[trackno] = {}
+                
+            # if "hd" in sys.argv:
+                # tracktype, new_sectors, synccount = quick_scan_hd_track(trackdata)
+                # tracktype2, new_sectors2, synccount2 = deeper_scan_hd_track(trackdata)
+            # else:
+                # tracktype, new_sectors, synccount = quick_scan_track(trackdata)
+                # tracktype2, new_sectors2, synccount2 = deeper_scan_track(trackdata)
+            
+            # if len(new_sectors) + len(new_sectors2) > 0:
+                # if len(new_sectors) > len(new_sectors2):
+                    # print("quick scan wins!  quick %2d  deep %2d" % (len(new_sectors), len(new_sectors2)))
+                    
+                # elif len(new_sectors) < len(new_sectors2):
+                    # print("deeper scan wins! quick %2d  deep %2d" % (len(new_sectors), len(new_sectors2)))
+                    
+            # if len(new_sectors) > 0 or len(new_sectors2) > 0:
+                # highest_with_data = max(highest_with_data, trackno)
+                
+            # for ts in new_sectors:
+                # htrackno, sectorno = ts
+                # if htrackno != trackno:
+                    # print("sector %d on wrong track, claims %d but should be %d" % (sectorno, htrackno, trackno))
+                    # print("adding anyway!")
+                    
+                # if sectorno not in known_sectors[trackno]:
+                    # known_sectors[trackno][sectorno] = new_sectors[ts]
+                # else:
+                    # if known_sectors[trackno][sectorno] != new_sectors[ts]:
+                        #raise Exception("MISMATCHING SECTORS")
+                        # print("SECTOR MISMATCH", trackno, sectorno)
+                        # compare_sectors(known_sectors[trackno][sectorno], new_sectors[ts])
+                        # use the quick scan one?
+                        # known_sectors[trackno][sectorno] = new_sectors[ts]
+                        
+                # if trackno < 160:
+                    # highest_sector = max(highest_sector, sectorno)
+
+            # for ts in new_sectors2:
+                # htrackno, sectorno = ts
+                # if htrackno != trackno:
+                    # print("sector %d on wrong track, claims %d but should be %d" % (sectorno, htrackno, trackno))
+                    # print("adding anyway!")
+                    
+                # if sectorno not in known_sectors[trackno]:
+                    # known_sectors[trackno][sectorno] = new_sectors2[ts]
+                    # print("Added another sector from deeper scan!", trackno, sectorno)
+                # else:
+                    # if known_sectors[trackno][sectorno] != new_sectors2[ts]:
+                        #raise Exception("MISMATCHING SECTORS")
+                        # print("SECTOR MISMATCH", trackno, sectorno)
+                        # compare_sectors(known_sectors[trackno][sectorno], new_sectors2[ts])
+                        
+                # if trackno < 160:
+                    # highest_sector = max(highest_sector, sectorno)
+                     
+    # if 0 in known_sectors and 0 in known_sectors[0]:
+        # bootsector = known_sectors[0][0]
+        
+        # bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
+            
+        # print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
+        # if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
+            # print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
+            
+    # writecount = 0
+    # imgfilename = sys.argv[1] + ".img"
+    # of2 = open(imgfilename, "wb")
+    # for trackno in range(0, highest_with_data + 1):
+        # if "even" in sys.argv and trackno % 2 == 1:
+            # continue
+            
+        # missings = []
+        # for sectorno in range(highest_sector + 1):
+            # if trackno in known_sectors and sectorno in known_sectors[trackno]:
+                # of2.write(known_sectors[trackno][sectorno])
+                # writecount += 1
+            # else:
+                # of2.write(b"CWTOOLBADSECTOR!" * 32)
+                # missings.append(sectorno)
+
+        # if len(missings) != 0:
+            # print("    missing from track", trackno, ":", missings)
+            
+    # of2.close()    
+
+    # print("    sectors written to %s: %d" % (imgfilename, writecount))
 
                     
             

@@ -360,6 +360,7 @@ def add_new_sector(known_sectors, trackno, sectorno, data):
             for i in range(0, 512, 32):
                 print(sector_a[i:i+32].hex(), sector_b[i:i+32].hex(), diff[i*2:i*2+64])
             print("")
+            #known_sectors[trackno][sectorno] = data
             #exit()
             
         #else:
@@ -822,10 +823,10 @@ if __name__ == "__main__":
                     vtrackno, sectorno, until_end, sector_label = header
                     if vtrackno != scan.trackno:
                         print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno, sectorno)
-                        if data != None:
-                            print("ADDING ANYWAY")
-                            add_new_sector(known_sectors, scan.trackno, sectorno, data)
-                            tag = "data"
+                        # if data != None:
+                            # print("ADDING ANYWAY")
+                            # add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                            # tag = "data"
                     else:
                         if data != None:
                             add_new_sector(known_sectors, scan.trackno, sectorno, data)
@@ -880,10 +881,10 @@ if __name__ == "__main__":
                         vtrackno, sectorno, until_end, sector_label = header
                         if vtrackno != scan.trackno:
                             print("warning, trackno in header differs from scan trackno", vtrackno, scan.trackno, sectorno)
-                            if data != None:
-                                print("ADDING ANYWAY")
-                                add_new_sector(known_sectors, scan.trackno, sectorno, data)
-                                tag = "data"
+                            #if data != None:
+                                # print("ADDING ANYWAY")
+                                # add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                                # tag = "data"
                         else:
                             if data != None:
                                 add_new_sector(known_sectors, scan.trackno, sectorno, data)

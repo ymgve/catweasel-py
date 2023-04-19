@@ -21,9 +21,6 @@ def readtest(usb, args):
     comment = comment.encode("utf8")
     of.write(b"\x00" + struct.pack("<I", len(comment)) + comment)
 
-    highest_sector = args.nsectors - 1
-    highest_with_data = 0
-
     target_retry = args.retries
 
     tracktypecounts = {}
@@ -50,13 +47,12 @@ def readtest(usb, args):
     if args.rev:
         target_tracks = target_tracks[::-1]
 
+    proc = gwrawparser.Processor(args, target_tracks)
+    
     firstread = True
     for trackno in target_tracks:
-        known_sectors = {}
-        
         retry = 0
         retrycount = target_retry
-        current_highest = 0
         
         while retry < retrycount:
             if retry == 0:
@@ -88,61 +84,57 @@ def readtest(usb, args):
             # clamp to make handling easier
             trackdata = [min(x, 1023) for x in flux.list]
             
-            splits2txt = ""
-            curr_status = {}
+            rt = gwrawparser.RawTrack(args, None, None, trackno, trackdata)
             
-            if args.hd:
-                tracktype, new_sectors, synccount = gwrawparser.quick_scan_hd_track(trackdata)
+            proc.process_tracks([rt], gwrawparser.quick_scan_track, False)
+            
+            if args.nsectors != -1:
+                sectortarget = args.nsectors
             else:
-                tracktype, new_sectors, synccount = gwrawparser.quick_scan_track(trackdata)
-            
-            if tracktype == "amiga" and len(new_sectors) > 0:
-                highest_sector = max(10, highest_sector)
+                sectortarget = proc.highest_sector + 1
                 
-            if tracktype not in tracktypecounts:
-                tracktypecounts[tracktype] = 0
-            tracktypecounts[tracktype] += 1
-                
-            for ts in new_sectors:
-                htrackno, sectorno = ts
-                if htrackno != trackno:
-                    print("sector on wrong track, claims %d but should be %d" % (htrackno, trackno))
-                else:
-                    if sectorno not in known_sectors:
-                        known_sectors[sectorno] = new_sectors[ts]
-                    else:
-                        if known_sectors[sectorno] != new_sectors[ts]:
-                            print("SECTOR MISMATCH", sectorno)
-
-                    if sectorno not in curr_status:
-                        curr_status[sectorno] = 0
-                        
-                    if trackno < 160:
-                        highest_sector = max(highest_sector, sectorno)
-                        
-                    current_highest = max(current_highest, sectorno)
+            highest_local = -1
+            for trackno2, sectorno in proc.known_sectors:
+                if trackno == trackno2:
+                    highest_local = max(highest_local, sectorno)
                     
-            sectortarget = max(highest_sector, current_highest) + 1
+            localtarget = max(highest_local + 1, sectortarget)
+            
             sectormap = ""
-            for i in range(sectortarget):
-                if i in known_sectors:
+            for sectorno in range(localtarget):
+                if (trackno, sectorno) in proc.known_sectors:
                     sectormap += "@ "
                 else:
                     sectormap += ". "
                         
             passmap = ""
-            for i in range(sectortarget):
-                if i in curr_status:
-                    passmap += str(curr_status[i] + 1) + " "
+            for sectorno in range(localtarget):
+                if (trackno, sectorno) in rt.known_sectors:
+                    passmap += "@ "
                 else:
                     passmap += ". "
+
+            sectorcount = 0
+            tracktype = "none"
+            for sectorno in range(localtarget):
+                if (trackno, sectorno) in proc.known_sectors:
+                    sectorcount += 1
                     
-            print("Track %3d try %2d: %6d fluxes, %2d/%2d sectors  %s  track type %s %s  %d syncs" % (trackno, retry, len(trackdata), len(known_sectors), highest_sector + 1, sectormap, tracktype, passmap, synccount))
+                    secs = list(proc.known_sectors[(trackno, sectorno)].values())
+                    sec = secs[0][0]
+                    if tracktype == "none":
+                        tracktype = sec.sectortype
+                    else:
+                        if tracktype != sec.sectortype:
+                            tracktype = "hybrid"
+                
+                    
+            print("Track %3d try %2d: %6d fluxes, %2d/%2d sectors  %s  track type %-6s  %s  %d syncs" % (trackno, retry, len(trackdata), sectorcount, localtarget, sectormap, tracktype, passmap, len(rt.syncs)))
             
-            if len(known_sectors) >= sectortarget:
+            if sectorcount >= localtarget:
                 break
                     
-            if len(known_sectors) == 0:
+            if sectorcount == 0:
                 if trackno >= 160:
                     retrycount = min(2, target_retry)
             else:
@@ -150,56 +142,53 @@ def readtest(usb, args):
                 
             retry += 1
             
-        allknown[trackno] = known_sectors
-        if len(known_sectors) > 0:
-            highest_with_data = max(trackno, highest_with_data)
-
-        tested_tracks.append(trackno)
-            
     of.close()
     
-    badsectors = []
-    badtracks = set()
-    goodcount = 0
-    numtracks = highest_with_data + 1
-
-    of2 = open(args.filename + ".img", "wb")
-    for trackno in tested_tracks:
-        if trackno <= highest_with_data:
-            for sectorno in range(highest_sector + 1):
-                if sectorno in allknown[trackno]:
-                    of2.write(allknown[trackno][sectorno])
-                    goodcount += 1
-                else:
-                    of2.write(b"CWTOOLBADSECTOR!" * 32)
-                    badsectors.append((trackno, sectorno))
-                    badtracks.add(trackno)
-    of2.close()
-
     print(args.filename)
+    
+    proc.generate_output()
+    # badsectors = []
+    # badtracks = set()
+    # goodcount = 0
+    # numtracks = highest_with_data + 1
 
-    if "dos" in tracktypecounts and 0 in allknown and 0 in allknown[0]:
-        bootsector = allknown[0][0]
+    # of2 = open(args.filename + ".img", "wb")
+    # for trackno in tested_tracks:
+        # if trackno <= highest_with_data:
+            # for sectorno in range(highest_sector + 1):
+                # if sectorno in allknown[trackno]:
+                    # of2.write(allknown[trackno][sectorno])
+                    # goodcount += 1
+                # else:
+                    # of2.write(b"CWTOOLBADSECTOR!" * 32)
+                    # badsectors.append((trackno, sectorno))
+                    # badtracks.add(trackno)
+    # of2.close()
+
+    # print(args.filename)
+
+    # if "dos" in tracktypecounts and 0 in allknown and 0 in allknown[0]:
+        # bootsector = allknown[0][0]
         
-        bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
+        # bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
             
-        print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
-        if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
-            print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
+        # print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
+        # if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
+            # print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
             
 
-    print("    track type stats", tracktypecounts)
-    print("    %3d (%3d) tracks read (sectors: good %4d  bad %4d)" % (numtracks, numtracks // 2, goodcount, len(badsectors)))
-    for trackno in range(numtracks):
-        s = ""
-        for trackno2, sectorno in badsectors:
-            if trackno == trackno2:
-                s += " %02d" % sectorno
+    # print("    track type stats", tracktypecounts)
+    # print("    %3d (%3d) tracks read (sectors: good %4d  bad %4d)" % (numtracks, numtracks // 2, goodcount, len(badsectors)))
+    # for trackno in range(numtracks):
+        # s = ""
+        # for trackno2, sectorno in badsectors:
+            # if trackno == trackno2:
+                # s += " %02d" % sectorno
                 
-        if s != "":
-            print("    track %3d: %s" % (trackno, s))
+        # if s != "":
+            # print("    track %3d: %s" % (trackno, s))
             
-    print("bad tracks", ",".join([str(x) for x in sorted(badtracks)]))
+    # print("bad tracks", ",".join([str(x) for x in sorted(badtracks)]))
                 
 
 def main(argv):
@@ -213,12 +202,15 @@ def main(argv):
     parser.add_argument("--even", action="store_true")
 
     parser.add_argument("-r", "--retries", type=int, default=10)
-    parser.add_argument("--nsectors", type=int, default=1)
+    parser.add_argument("--nsectors", type=int, default=-1)
     parser.add_argument("--hd", action="store_true")
+    parser.add_argument("--useht", action="store_true")
+    parser.add_argument("--usert", action="store_true")
+    parser.add_argument("--selected")
     
     args = parser.parse_args()
 
-    if ".graw" not in args.filename:
+    if not args.filename.endswith(".graw"):
         raise Exception("wrong filename extension?")
         
         

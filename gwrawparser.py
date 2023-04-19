@@ -460,12 +460,12 @@ def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_sk
                 htrackno = side + cyl * 2
                 sectorsize = 1 << (7 + sectorsizebits)
                 if sectorsize != 512:
-                    print("Nonstandard header sectorsize", sectorsize, "for sector", rawsectorno - 1)
+                    print("Nonstandard header sectorsize %d for track %d htrack %d sector %d" % (sectorsize, rawtrack.trackno, htrackno, rawsectorno - 1))
                     
                 ok = True
         
                 if side not in (0, 1):
-                    print("header side not 0 or 1!!!")
+                    print("header side %d, not 0 or 1!!! for track %d htrack %d sector %d" % (side, rawtrack.trackno, htrackno, rawsectorno - 1))
                     ok = False
                     
                 #if rawsectorno >= 30:
@@ -665,7 +665,8 @@ class Sector:
         self.data = data
         
 class RawTrack:
-    def __init__(self, filename, trackoffset, trackno, trackdata):
+    def __init__(self, args, filename, trackoffset, trackno, trackdata):
+        self.args = args
         self.filename = filename
         self.trackoffset = trackoffset
         self.trackno = trackno
@@ -697,18 +698,28 @@ class RawTrack:
         return False
         
     def add_sector(self, sec):
-        ts = (sec.htrackno, sec.sectorno)
+        if sec.htrackno != self.trackno:
+            print("Mismatch between rawtrack trackno %d and header trackno %d for sector %d" % (self.trackno, sec.htrackno, sec.sectorno))
+            if self.args.useht:
+                ts = (sec.htrackno, sec.sectorno)
+            elif self.args.usert:
+                ts = (self.trackno, sec.sectorno)
+            else:
+                return False
+                
+            print("Adding as track %d sector %d" % ts)
+            
+        else:
+            ts = (sec.htrackno, sec.sectorno)
+            
         if ts not in self.known_sectors:
             if sec.sectorno >= 30:
-                print("sector with too large sector number!!!!!!!!!", sec.sectorno)
+                print("sector with too large sector number!!!!!!!!!", sec.sectorno, ts)
                 return False
                 
             if sec.sectorsize != 512:
                 print("Added sector %d,%d with nonstandard sectorsize %d" % (sec.htrackno, sec.sectorno, sec.sectorsize))
 
-            if sec.htrackno != self.trackno:
-                print("Mismatch between rawtrack trackno %d and header trackno %d" % (self.trackno, sec.htrackno))
-                
             self.known_sectors[ts] = {}
             self.known_sectors[ts][sec.data] = [sec]
             
@@ -814,20 +825,21 @@ def gather_rawtracks(args, target_tracks):
 
                     trackdata = [min(x, 1023) for x in trackdata]
                     
-                    rt = RawTrack(filename, trackoffset, trackno, trackdata)
+                    rt = RawTrack(args, filename, trackoffset, trackno, trackdata)
                     rawtracks.append(rt)
                 
                 
     return rawtracks
 
 class Processor:
-    def __init__(self, args):
+    def __init__(self, args, target_tracks):
         self.args = args
+        self.target_tracks = target_tracks
         self.known_sectors = {}
         self.highest_sector = -1
         self.highest_track = -1
         
-    def process_tracks(self, rawtracks, scanner_func):
+    def process_tracks(self, rawtracks, scanner_func, verbose=True):
         for rawtrack in rawtracks:
             new_sectors = scanner_func(self.args, rawtrack)
             
@@ -836,16 +848,10 @@ class Processor:
             for sec in new_sectors:
                 ts = (sec.htrackno, sec.sectorno)
                 if ts not in self.known_sectors:
-                    if sec.htrackno != rawtrack.trackno:
-                        if not self.args.ignoreht:
-                            continue
-                            
-                        print("adding sector htrack %d sector %d even though it's actually on track %d" % (sec.htrackno, sec.sectorno, rawtrack.trackno))
-                        
                     self.known_sectors[ts] = {}
                     self.known_sectors[ts][sec.data] = [sec]
                      
-                    if rawtrack.trackno < 150:  # some disks "end" below 160 too but have more data after
+                    if rawtrack.trackno < 160:
                         self.highest_sector = max(self.highest_sector, sec.sectorno)
                         
                     self.highest_track = max(self.highest_track, rawtrack.trackno)
@@ -859,12 +865,185 @@ class Processor:
                         self.known_sectors[ts][sec.data] = [sec]
                         added += 1
                         
-            if added > 0:
+            if verbose and added > 0:
                 print("got %d new sectors after processing track %d, now in total %d | %s" % (added, rawtrack.trackno, len(self.known_sectors), rawtrack.get_descr()))
         
+    def generate_output(self):
+        if self.args.selected:
+            selected = self.args.selected.split(",")
+        else:
+            selected = []
+        
+        weaktracks = set()
+        sectorchoices = {}
+        for ts in sorted(self.known_sectors):
+            trackno, sectorno = ts
+            known = self.known_sectors[ts]
+            variants = len(known)
+
+            if variants == 1:
+                secs = list(known.values())[0]
+                sec = secs[0] # pick the first as representative
+                sectorchoices[ts] = (sec, len(secs))
+                
+            else:
+                print("MULTIPLE CONFLICTING SECTORS FOR TRACK %d SECTOR %d" % (trackno, sectorno))
+                weaktracks.add(trackno)
+                
+                votedata = []
+                pickedsector = None
+                for seckey in known:
+                    votes = len(known[seckey])
+                    quality = 0
+                    for sec in known[seckey]:
+                        quality += sec.quality
+                        
+                    fingerprint = hashlib.sha256(known[seckey][0].data).hexdigest()[0:12]
+                    if fingerprint in selected:
+                        if pickedsector != None:
+                            raise Exception("picked multiple selected from conflicting sectors")
+                            
+                        pickedsector = known[seckey][0]
+                        print("picked sector based on given fingerprint")
+                        
+                    votedata.append((votes, quality, seckey, fingerprint))
+                    
+                sortedvotes = sorted(votedata)[::-1]
+                
+                if pickedsector == None:
+                    votes, quality, seckey, fingerprint = sortedvotes[0]
+                    pickedsector = known[seckey][0]
+                    sectorchoices[ts] = (pickedsector, votes)
+                
+                if sortedvotes[0][0] == sortedvotes[1][0] and sortedvotes[0][1] == sortedvotes[1][1]:
+                    print("WARNING TOP 2 SECTORS WITH EQUAL VOTES AND QUALITY")
+                    
+                for votes, quality, seckey, fingerprint in sortedvotes:
+                    desc = "fp %s  %d votes:" % (fingerprint, votes)
+                    for sec in known[seckey]:
+                        desc += " %s,%d" % (sec.sourcefunc, sec.quality)
+                        
+                    sec = known[seckey][0]
+                    if sec == pickedsector:
+                        print("SELECTED", desc)
+                        for i in range(0, 512, 32):
+                            print(sec.data[i:i+32].hex())
+                            
+                        print("")
+                    else:
+                        print(desc)
+                        compare_sectors(sec.data, pickedsector.data)
+
+        
+        
+        if self.args.nsectors != -1:
+            nsectors = self.args.nsectors
+        else:
+            nsectors = self.highest_sector + 1
+            
+        target_sectorsize = 512
+        
+        remaining_ts = set(sectorchoices)
+        goodcount = 0
+        badcount = 0
+        
+        sectortypestats = {}
+        output = bytearray()
+        badtracks = set()
+        for trackno in self.target_tracks:
+            # skip empty tracks
+            if trackno > self.highest_track:
+                continue
+                
+            trackdesc = "    %3d: " % trackno
+            
+            missings = []
+            
+            for sectorno in range(nsectors):
+                added = False
+                ts = (trackno, sectorno)
+                if ts in sectorchoices:
+                    sec, count = sectorchoices[ts]
+                    if sec.sectorsize == target_sectorsize:
+                        output += sec.data
+                        trackdesc += "%3d " % count
+                        
+                        if sec.sectortype not in sectortypestats:
+                            sectortypestats[sec.sectortype] = 0
+                        sectortypestats[sec.sectortype] += 1
+                        
+                        added = True
+                        if ts in remaining_ts:
+                            remaining_ts.remove(ts)
+                            
+                        goodcount += 1
+                        
+                    else:
+                        print("skipping sector because different sector size %d" % sec.sectorsize)
+                        
+                if not added:
+                    output += b"CWTOOLBADSECTOR!" * 32
+                    missings.append(sectorno)
+                    trackdesc += "--- "
+                    badcount += 1
+                    badtracks.add(trackno)
+                    
+            if len(missings) != 0:
+                print(trackdesc, "missing", missings)
+            
+        if (0,0) in self.known_sectors:
+            secs = self.known_sectors[(0,0)]
+            if len(secs) > 1:
+                print("DUPLICATE SECTOR 0,0!")
+                
+            elif len(secs) == 1:
+                sec = list(secs.values())[0][0]
+                if sec.sectortype == "dos":
+                    bootsector = sec.data
+                    bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
+                        
+                    print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
+                    if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
+                        print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
+            
+        imgfilename = sys.argv[1] + ".img"
+        of2 = open(imgfilename, "wb")
+        of2.write(output)
+        of2.close()    
+
+        print("    highest track with data", self.highest_track)
+        print("    sector type stats", sectortypestats)
+        print("    sectors written to %s: %d good    %d bad" % (imgfilename, goodcount, badcount))
+        
+        if len(badtracks) != 0:
+            print("    incomplete tracks: ", ",".join(str(x) for x in sorted(badtracks)))
+
+        if len(weaktracks) != 0:
+            print("    tracks with weak sectors: ", ",".join(str(x) for x in sorted(weaktracks)))
+            
+        badweak = badtracks | weaktracks
+        if len(badweak) != 0:
+            print("    all tracks to retry: ", ",".join(str(x) for x in sorted(badweak)))
+            
+            
+            
+        for ts in sorted(remaining_ts):
+            print("Not included in image: track %d sector %d" % ts)
+            sec, count = sectorchoices[ts]
+            empty = False
+            if sec.data == bytes(512):
+                empty = True
+                
+            if empty:
+                print("Empty")
+            else:
+                for i in range(0, 512, 32):
+                    print(sec.data[i:i+32].hex())
+                    
+            print("")    
         
 def main():
-    parser = argparse. ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument("filenames", nargs="+")
 
     parser.add_argument("-t", "--tracks")
@@ -874,6 +1053,8 @@ def main():
     parser.add_argument("--nsectors", type=int, default=-1)
     parser.add_argument("--hd", action="store_true")
     parser.add_argument("--ignoreht", action="store_true")
+    parser.add_argument("--useht", action="store_true")
+    parser.add_argument("--usert", action="store_true")
     parser.add_argument("--selected")
     
     args = parser.parse_args()
@@ -897,8 +1078,7 @@ def main():
             
     rawtracks = gather_rawtracks(args, target_tracks)
     
-    
-    proc = Processor(args)
+    proc = Processor(args, target_tracks)
     
     print("starting normal scan")
     proc.process_tracks(rawtracks, quick_scan_track)
@@ -909,159 +1089,8 @@ def main():
     print("starting skew lut scan")
     proc.process_tracks(rawtracks, quick_scan_track_skew)
 
-
-    if args.selected:
-        selected = args.selected.split(",")
-    else:
-        selected = []
+    proc.generate_output()
     
-    sectorchoices = {}
-    for ts in proc.known_sectors:
-        trackno, sectorno = ts
-        known = proc.known_sectors[ts]
-        variants = len(known)
-
-        if variants == 1:
-            secs = list(known.values())[0]
-            sec = secs[0] # pick the first as representative
-            sectorchoices[ts] = (sec, len(secs))
-            
-        else:
-            print("MULTIPLE CONFLICTING SECTORS FOR TRACK %d SECTOR %d" % (trackno, sectorno))
-            votedata = []
-            pickedsector = None
-            for seckey in known:
-                votes = len(known[seckey])
-                quality = 0
-                for sec in known[seckey]:
-                    quality += sec.quality
-                    
-                fingerprint = hashlib.sha256(known[seckey][0].data).hexdigest()[0:12]
-                if fingerprint in selected:
-                    if pickedsector != None:
-                        raise Exception("picked multiple selected from conflicting sectors")
-                        
-                    pickedsector = known[seckey][0]
-                    print("picked sector based on given fingerprint")
-                    
-                votedata.append((votes, quality, seckey, fingerprint))
-                
-            sortedvotes = sorted(votedata)[::-1]
-            
-            if pickedsector == None:
-                votes, quality, seckey, fingerprint = sortedvotes[0]
-                pickedsector = known[seckey][0]
-                sectorchoices[ts] = (pickedsector, votes)
-            
-            if sortedvotes[0][0] == sortedvotes[1][0] and sortedvotes[0][1] == sortedvotes[1][1]:
-                print("WARNING TOP 2 SECTORS WITH EQUAL VOTES AND QUALITY")
-                
-            for votes, quality, seckey, fingerprint in sortedvotes:
-                desc = "fp %s  %d votes:" % (fingerprint, votes)
-                for sec in known[seckey]:
-                    desc += " %s,%d" % (sec.sourcefunc, sec.quality)
-                    
-                sec = known[seckey][0]
-                if sec == pickedsector:
-                    print("SELECTED", desc)
-                    for i in range(0, 512, 32):
-                        print(sec.data[i:i+32].hex())
-                        
-                    print("")
-                else:
-                    print(desc)
-                    compare_sectors(sec.data, pickedsector.data)
-
-    
-    
-    if args.nsectors != -1:
-        nsectors = args.nsectors
-    else:
-        nsectors = proc.highest_sector + 1
-        
-    target_sectorsize = 512
-    
-    remaining_ts = set(sectorchoices)
-    goodcount = 0
-    badcount = 0
-    
-    sectortypestats = {}
-    output = bytearray()
-    for trackno in target_tracks:
-        # skip empty tracks
-        if trackno > proc.highest_track:
-            continue
-            
-        trackdesc = "%3d: " % trackno
-        
-        missings = []
-        
-        for sectorno in range(nsectors):
-            added = False
-            ts = (trackno, sectorno)
-            if ts in sectorchoices:
-                sec, count = sectorchoices[ts]
-                if sec.sectorsize == target_sectorsize:
-                    output += sec.data
-                    trackdesc += "%3d " % count
-                    
-                    if sec.sectortype not in sectortypestats:
-                        sectortypestats[sec.sectortype] = 0
-                    sectortypestats[sec.sectortype] += 1
-                    
-                    added = True
-                    remaining_ts.remove(ts)
-                    goodcount += 1
-                    
-                else:
-                    print("skipping sector because different sector size %d" % sec.sectorsize)
-                    
-            if not added:
-                output += b"CWTOOLBADSECTOR!" * 32
-                missings.append(sectorno)
-                trackdesc += "--- "
-                badcount += 1
-                
-        if len(missings) != 0:
-            print(trackdesc, "missing", missings)
-        
-    if (0,0) in proc.known_sectors:
-        secs = proc.known_sectors[(0,0)]
-        if len(secs) > 1:
-            print("DUPLICATE SECTOR 0,0!")
-            
-        elif len(secs) == 1:
-            sec = list(secs.values())[0][0]
-            if sec.sectortype == "dos":
-                bootsector = sec.data
-                bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads = struct.unpack("<HBxxxxxHxxxHH", bootsector[0x0b:0x1c])
-                    
-                print("    BPB: %d bytes/sector, %d sectors per cluster, %d total sectors, %d sectors per track, %d heads" % (bpb_bps, bpb_spc, bpb_tot, bpb_spt, bpb_heads))
-                if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
-                    print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
-        
-    imgfilename = sys.argv[1] + ".img"
-    of2 = open(imgfilename, "wb")
-    of2.write(output)
-    of2.close()    
-
-    print("    sector type stats", sectortypestats)
-    print("    sectors written to %s: %d good    %d bad" % (imgfilename, goodcount, badcount))
-          
-    for ts in sorted(remaining_ts):
-        print("Not included in image: track %d sector %d" % ts)
-        sec, count = sectorchoices[ts]
-        empty = False
-        if sec.data == bytes(512):
-            empty = True
-            
-        if empty:
-            print("Empty")
-        else:
-            for i in range(0, 512, 32):
-                print(sec.data[i:i+32].hex())
-                
-        print("")
             
 if __name__ == "__main__":
     main()

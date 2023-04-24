@@ -204,8 +204,8 @@ def main(argv):
     parser.add_argument("-r", "--retries", type=int, default=10)
     parser.add_argument("--nsectors", type=int, default=-1)
     parser.add_argument("--hd", action="store_true")
+    parser.add_argument("--rpm360", action="store_true")
     parser.add_argument("--useht", action="store_true")
-    parser.add_argument("--usert", action="store_true")
     parser.add_argument("--selected")
     
     args = parser.parse_args()

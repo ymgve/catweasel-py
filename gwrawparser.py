@@ -37,6 +37,18 @@ for i in range(495, 1024):
     mfmdd_lut[i] = 8
 
 
+mfmdd360_lut = [0] * 1024
+for i in range(0, 297):
+    mfmdd360_lut[i] = 2
+
+for i in range(297, 412):
+    mfmdd360_lut[i] = 4
+
+for i in range(412, 1024):
+    mfmdd360_lut[i] = 8
+
+
+
 mfmhd_lut = [0] * 1024
 for i in range(0, 178):
     mfmhd_lut[i] = 2
@@ -491,6 +503,9 @@ def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_sk
                 if distance < 500:
                     if distance > 350:
                         print("unusually long distance between header and data?", distance, sectorno)
+                    # else:
+                        # print("distance between header and data %d for htrack %d sector %d" % (distance, htrackno, sectorno))
+                        
                         
                     segment = rawtrack.trackdata[startpos2:]
                     if not use_skew:
@@ -514,7 +529,12 @@ def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_sk
                             new_sectors.append(sec)
                     else:
                         # handle broken sector here, with logging or something
+                        # for i in range(1, len(data), 32):
+                            # print(data[i:i+32].hex())
+                        # print(" ")
+                        
                         pass
+                        
 
 
 def quick_scan_amiga(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_skew=False):
@@ -551,6 +571,8 @@ def quick_scan_track(args, rawtrack):
     
     if args.hd:
         lut = mfmhd_lut
+    elif args.rpm360:
+        lut = mfmdd360_lut
     else:
         lut = mfmdd_lut
         
@@ -701,16 +723,16 @@ class RawTrack:
         if sec.htrackno != self.trackno:
             print("Mismatch between rawtrack trackno %d and header trackno %d for sector %d" % (self.trackno, sec.htrackno, sec.sectorno))
             if self.args.useht:
-                ts = (sec.htrackno, sec.sectorno)
-            elif self.args.usert:
-                ts = (self.trackno, sec.sectorno)
+                sec.trackno = sec.htrackno
             else:
-                return False
-                
-            print("Adding as track %d sector %d" % ts)
+                sec.trackno = self.trackno
+            
+            print("Adding as track %d sector %d" % (sec.trackno, sec.sectorno))
             
         else:
-            ts = (sec.htrackno, sec.sectorno)
+            sec.trackno = sec.htrackno
+            
+        ts = (sec.trackno, sec.sectorno)
             
         if ts not in self.known_sectors:
             if sec.sectorno >= 30:
@@ -718,7 +740,7 @@ class RawTrack:
                 return False
                 
             if sec.sectorsize != 512:
-                print("Added sector %d,%d with nonstandard sectorsize %d" % (sec.htrackno, sec.sectorno, sec.sectorsize))
+                print("Added sector %d,%d with nonstandard sectorsize %d" % (sec.trackno, sec.sectorno, sec.sectorsize))
 
             self.known_sectors[ts] = {}
             self.known_sectors[ts][sec.data] = [sec]
@@ -732,7 +754,7 @@ class RawTrack:
                 return False
                 
             else:
-                print("SECTOR MISMATCH INSIDE RAW TRACK trackno %d htrackno %d sector %d" % (self.trackno, sec.htrackno, sec.sectorno))
+                print("SECTOR MISMATCH INSIDE RAW TRACK trackno %d trackno %d sector %d" % (self.trackno, sec.trackno, sec.sectorno))
                 self.known_sectors[ts][sec.data] = [sec]
                 return True
                 
@@ -785,49 +807,49 @@ class RawTrack:
 def gather_rawtracks(args, target_tracks):
     rawtracks = []
     
-    for filename in args.filenames:
-        f = open(filename, "rb")
+    #for filename in args.filenames:
+    f = open(args.filename, "rb")
 
-        magic = f.read(32)
-        if magic != b"gwreader raw data".ljust(32, b"\x00"):
-            raise Exception("bad magic")
+    magic = f.read(32)
+    if magic != b"gwreader raw data".ljust(32, b"\x00"):
+        raise Exception("bad magic")
+        
+    while True:
+        trackoffset = f.tell()
+        datatype = f.read(1)
+        if len(datatype) == 0:
+            break
             
-        while True:
-            trackoffset = f.tell()
-            datatype = f.read(1)
-            if len(datatype) == 0:
-                break
-                
-            if datatype == b"\x00":
-                sz = struct.unpack("<I", f.read(4))[0]
-                comment = f.read(sz)
-                
-            elif datatype != b"\xca":
-                raise Exception()
-                
-            else:
-                trackno, indexsize, fluxsize = struct.unpack("<BII", f.read(9))
-                f.read(indexsize) # ignore indexes for now
-                fluxdata = f.read(fluxsize)
+        if datatype == b"\x00":
+            sz = struct.unpack("<I", f.read(4))[0]
+            comment = f.read(sz)
+            
+        elif datatype != b"\xca":
+            raise Exception()
+            
+        else:
+            trackno, indexsize, fluxsize = struct.unpack("<BII", f.read(9))
+            f.read(indexsize) # ignore indexes for now
+            fluxdata = f.read(fluxsize)
 
-                if trackno in target_tracks:
-                    bio = io.BytesIO(fluxdata)
-                    trackdata = []
-                    while True:
-                        b = bio.read(2)
-                        if len(b) == 0:
-                            break
-                            
-                        flux = struct.unpack("<H", b)[0]
-                        if flux == 0xffff:
-                            flux = struct.unpack("<Q", bio.read(8))[0]
-                        trackdata.append(flux)
+            if trackno in target_tracks:
+                bio = io.BytesIO(fluxdata)
+                trackdata = []
+                while True:
+                    b = bio.read(2)
+                    if len(b) == 0:
+                        break
+                        
+                    flux = struct.unpack("<H", b)[0]
+                    if flux == 0xffff:
+                        flux = struct.unpack("<Q", bio.read(8))[0]
+                    trackdata.append(flux)
 
-                    trackdata = [min(x, 1023) for x in trackdata]
-                    
-                    rt = RawTrack(args, filename, trackoffset, trackno, trackdata)
-                    rawtracks.append(rt)
+                trackdata = [min(x, 1023) for x in trackdata]
                 
+                rt = RawTrack(args, args.filename, trackoffset, trackno, trackdata)
+                rawtracks.append(rt)
+            
                 
     return rawtracks
 
@@ -846,7 +868,7 @@ class Processor:
             added = 0
             
             for sec in new_sectors:
-                ts = (sec.htrackno, sec.sectorno)
+                ts = (sec.trackno, sec.sectorno)
                 if ts not in self.known_sectors:
                     self.known_sectors[ts] = {}
                     self.known_sectors[ts][sec.data] = [sec]
@@ -861,7 +883,7 @@ class Processor:
                     if sec.data in self.known_sectors[ts]:
                         self.known_sectors[ts][sec.data].append(sec)
                     else:
-                        print("SECTOR MISMATCH BETWEEN RAW TRACKS trackno %d htrackno %d sector %d" % (rawtrack.trackno, sec.htrackno, sec.sectorno))
+                        print("SECTOR MISMATCH BETWEEN RAW TRACKS trackno %d trackno %d sector %d" % (rawtrack.trackno, sec.trackno, sec.sectorno))
                         self.known_sectors[ts][sec.data] = [sec]
                         added += 1
                         
@@ -950,7 +972,7 @@ class Processor:
         sectortypestats = {}
         output = bytearray()
         badtracks = set()
-        for trackno in self.target_tracks:
+        for trackno in sorted(self.target_tracks):
             # skip empty tracks
             if trackno > self.highest_track:
                 continue
@@ -1006,7 +1028,7 @@ class Processor:
                     if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
                         print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
             
-        imgfilename = sys.argv[1] + ".img"
+        imgfilename = self.args.filename + ".img"
         of2 = open(imgfilename, "wb")
         of2.write(output)
         of2.close()    
@@ -1037,14 +1059,14 @@ class Processor:
             if empty:
                 print("Empty")
             else:
-                for i in range(0, 512, 32):
+                for i in range(0, len(sec.data), 32):
                     print(sec.data[i:i+32].hex())
                     
             print("")    
         
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("filenames", nargs="+")
+    parser.add_argument("filename")
 
     parser.add_argument("-t", "--tracks")
     parser.add_argument("--odd", action="store_true")
@@ -1052,9 +1074,9 @@ def main():
 
     parser.add_argument("--nsectors", type=int, default=-1)
     parser.add_argument("--hd", action="store_true")
+    parser.add_argument("--rpm360", action="store_true")
     parser.add_argument("--ignoreht", action="store_true")
     parser.add_argument("--useht", action="store_true")
-    parser.add_argument("--usert", action="store_true")
     parser.add_argument("--selected")
     
     args = parser.parse_args()
@@ -1068,12 +1090,12 @@ def main():
             target_tracks = set([int(x) for x in args.tracks.split(",")])
             
     else:
-        if args.even:
-            target_tracks = set(range(0, 168, 2))
-        elif args.odd:
-            target_tracks = set(range(1, 168, 2))
-        else:
-            target_tracks = set(range(0, 168, 1))
+        target_tracks = set(range(0, 168, 1))
+        
+    if args.even:
+        target_tracks = set(x for x in target_tracks if (x % 2) == 0)
+    elif args.odd:
+        target_tracks = set(x for x in target_tracks if (x % 2) == 1)
             
             
     rawtracks = gather_rawtracks(args, target_tracks)

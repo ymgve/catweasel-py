@@ -1,4 +1,4 @@
-import io, struct, sys, argparse, hashlib
+import io, os, struct, sys, argparse, hashlib
 
 width = 30
 mfmdd_drivestats = [-2] * 1024
@@ -108,7 +108,7 @@ def make_lut(trackdata, low, med, high):
     lowestpos_lo = 0
     lowest = 9999999999
     zeros = 0
-    bestzeros = 6 # converting from 14mhz catweasel data WILL leave holes, so make sure we ignore them
+    bestzeros = 12 # converting from catweasel data WILL leave holes, so make sure we ignore them
     bestzeropos = None
     for i in range(low, med):
         if stats[i] < lowest:
@@ -131,7 +131,7 @@ def make_lut(trackdata, low, med, high):
     lowestpos_hi = 0
     lowest = 9999999999
     zeros = 0
-    bestzeros = 6
+    bestzeros = 12
     bestzeropos = None
     for i in range(med, high):
         if stats[i] < lowest:
@@ -804,16 +804,35 @@ class RawTrack:
                 
         return s
 
-def gather_rawtracks(args, target_tracks):
-    rawtracks = []
-    
-    #for filename in args.filenames:
-    f = open(args.filename, "rb")
-
-    magic = f.read(32)
-    if magic != b"gwreader raw data".ljust(32, b"\x00"):
-        raise Exception("bad magic")
+def gather_rawtracks_cw(args, f, target_tracks, rawtracks):
+    while True:
+        trackoffset = f.tell()
+        trackheader = f.read(8)
+        if len(trackheader) == 0:
+            break
+            
+        trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
+        trackdata2 = f.read(tsize)
         
+        # comment data
+        if trackmagic == 0:
+            continue
+
+        if trackmagic != 0xca:
+            raise Exception()
+
+        if trackno in target_tracks:
+            if clock == 0:
+                mult = 72.0 / 7.0 # catweasel claims to sample at 14mhz but the samples seem closer to 7mhz
+            else:
+                raise Exception()
+                
+            trackdata = [min(1023, int((x & 0x7f) * mult)) for x in trackdata2]
+            
+            rt = RawTrack(args, args.filename, trackoffset, trackno, trackdata)
+            rawtracks.append(rt)
+
+def gather_rawtracks_gw(args, f, target_tracks, rawtracks):
     while True:
         trackoffset = f.tell()
         datatype = f.read(1)
@@ -850,6 +869,36 @@ def gather_rawtracks(args, target_tracks):
                 rt = RawTrack(args, args.filename, trackoffset, trackno, trackdata)
                 rawtracks.append(rt)
             
+def gather_rawtracks_file(args, filename, target_tracks, rawtracks):
+    f = open(filename, "rb")
+
+    magic = f.read(32)
+    if magic == b"cwtool raw data 3".ljust(32, b"\x00"):
+        gather_rawtracks_cw(args, f, target_tracks, rawtracks)
+        
+    elif magic == b"gwreader raw data".ljust(32, b"\x00"):
+        gather_rawtracks_gw(args, f, target_tracks, rawtracks)
+    
+    else:
+        raise Exception("bad magic")
+        
+
+def gather_rawtracks(args, target_tracks):
+    rawtracks = []
+    
+    if ".graw" in args.filename:
+        extrafilename = args.filename.replace(".graw", ".raw")
+        if os.path.isfile(extrafilename):
+            print("adding extra file", extrafilename)
+            gather_rawtracks_file(args, extrafilename, target_tracks, rawtracks)
+            
+    elif ".raw" in args.filename:
+        extrafilename = args.filename.replace(".raw", ".graw")
+        if os.path.isfile(extrafilename):
+            print("adding extra file", extrafilename)
+            gather_rawtracks_file(args, extrafilename, target_tracks, rawtracks)
+        
+    gather_rawtracks_file(args, args.filename, target_tracks, rawtracks)
                 
     return rawtracks
 
@@ -1060,7 +1109,14 @@ class Processor:
                 print("Empty")
             else:
                 for i in range(0, len(sec.data), 32):
-                    print(sec.data[i:i+32].hex())
+                    s = ""
+                    for c in sec.data[i:i+32]:
+                        if c >= 32 and c <= 126:
+                            s += chr(c)
+                        else:
+                            s += "."
+                            
+                    print(sec.data[i:i+32].hex(), s)
                     
             print("")    
         

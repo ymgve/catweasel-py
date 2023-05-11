@@ -1,6 +1,35 @@
 import struct, sys, hashlib, io, random, time, array
 
-from bitstream import *
+class Bitstream(object):
+    def __init__(self, trackdata, splitlut):
+        self.trackdata = trackdata
+        self.index = 0
+        self.pending = 0
+        self.splitlut = splitlut
+        self.last = None
+        
+    def get_bit(self):
+        if self.pending == 0:
+            try:
+                t = self.trackdata[self.index]
+            except:
+                return None
+
+            n = (t & 0x7f)
+            if n < 0:
+                n = 0
+            if n > 0x7f:
+                n = 0x7f
+                
+            self.pending = self.splitlut[n]
+            
+            self.index += 1
+                
+        self.last = self.pending & 1
+        self.pending >>= 1
+        
+        return self.last
+
 
 crclookup = []
 for i in range(256):

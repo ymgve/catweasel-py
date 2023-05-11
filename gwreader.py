@@ -37,16 +37,18 @@ def readtest(usb, args):
             target_tracks = [int(x) for x in args.tracks.split(",")]
             
     else:
-        if args.even:
-            target_tracks = list(range(0, 168, 2))
-        elif args.odd:
-            target_tracks = list(range(1, 168, 2))
-        else:
-            target_tracks = list(range(0, 168, 1))
-            
+        target_tracks = list(range(0, DRIVE_MAX_TRACKS, 1))
+
+    if args.even:
+        target_tracks = [x for x in target_tracks if (x % 2) == 0]
+    elif args.odd:
+        target_tracks = [x for x in target_tracks if (x % 2) == 1]
+        
     if args.rev:
         target_tracks = target_tracks[::-1]
 
+    target_tracks = [x for x in target_tracks if x < DRIVE_MAX_TRACKS]
+    
     proc = gwrawparser.Processor(args, target_tracks)
     
     firstread = True

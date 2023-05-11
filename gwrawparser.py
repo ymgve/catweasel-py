@@ -200,7 +200,8 @@ def compare_sectors(sector_a, sector_b):
 
 class Bitstream(object):
     def __init__(self, trackdata, splitlut):
-        self.trackdata = [splitlut[x] for x in trackdata]
+        self.trackdata = trackdata
+        self.trackdata2 = [splitlut[x] for x in trackdata]
         self.index = 0
         self.pending = 0
         self.last = None
@@ -208,7 +209,7 @@ class Bitstream(object):
     def get_bit(self):
         if self.pending == 0:
             try:
-                self.pending = self.trackdata[self.index]
+                self.pending = self.trackdata2[self.index]
             except:
                 return None
             
@@ -298,14 +299,23 @@ def getamigaword(bs):
         
     return rawres, missing_syncs
     
-def parse_amiga_sector(bs):
+def parse_amiga_sector(bs, debug=False):
     words = []
     total_missing = 0
     csum = 0
     for i in range(12):
         rawres, missing_syncs = getamigaword(bs)
-        if rawres == None or missing_syncs != 0:
-            #print("bad header data")
+        if rawres == None:
+            if debug:
+                print("Incomplete header data")
+                
+            return None, None
+                
+                
+        if missing_syncs != 0:
+            if debug:
+                print("Bad header data")
+                
             return None, None
             
         words.append(rawres)
@@ -313,7 +323,9 @@ def parse_amiga_sector(bs):
         
     csum &= 0x55555555
     if csum != 0:
-        #print("bad Amiga header checksum", hex(csum))
+        if debug:
+            print("bad Amiga header checksum", hex(csum))
+            
         return None, None
         
     #print("OK Amiga header checksum")
@@ -326,15 +338,21 @@ def parse_amiga_sector(bs):
     until_end = headerdata & 0xff
 
     if format_id != 0xff:
-        #print("Bad format ID", format_id)
+        if debug:
+            print("Bad format ID", format_id)
+            
         return None, None
         
     if sectorno > 30: # upper limit dumb number picked at random
-        #print("Bad sectorno", sectorno)
+        if debug:
+            print("Bad sectorno", sectorno)
+            
         return None, None
     
     if until_end > 30: # upper limit dumb number picked at random
-        #print("Strange until_end value", until_end)
+        if debug:
+            print("Strange until_end value", until_end)
+            
         return None, None
     
     sector_label = bytearray()
@@ -354,24 +372,28 @@ def parse_amiga_sector(bs):
     csum = 0
     for i in range(258):
         rawres, missing_syncs = getamigaword(bs)
-        if rawres == None or missing_syncs != 0:
-            #print("bad sector data", i, bs.index, rawres, missing_syncs)
+        if rawres == None:
+            if debug:
+                print("incomplete sector data", i, trackno, sectorno, bs.index, rawres, missing_syncs)
+                
+            return header, None
+        
+        if missing_syncs != 0:
+            if debug:
+                print("bad sector data", i, trackno, sectorno, bs.index, bs.trackdata[bs.index-10:bs.index+10], rawres, missing_syncs)
+                open("_foo.txt", "a").write(repr(bs.trackdata) + "\n")
+                
             return header, None
 
-        # if rawres == None:
-            # print("bad sector data", i, rawres, missing_syncs)
-            # return header, None
-            
-        # if missing_syncs != 0:
-            # print("bad sector data", i, trackno, sectorno, bs.index, hex(rawres), missing_syncs)
-        
         words.append(rawres)
         csum ^= rawres
         total_missing += missing_syncs
         
     csum &= 0x55555555
     if csum != 0:
-        #print("bad data crc", sectorno, hex(csum))
+        if debug:
+            print("bad data crc", trackno, sectorno, hex(csum))
+            
         return header, None
         
     data = bytearray()
@@ -824,7 +846,10 @@ def gather_rawtracks_cw(args, f, target_tracks, rawtracks):
         if trackno in target_tracks:
             if clock == 0:
                 mult = 72.0 / 7.0 # catweasel claims to sample at 14mhz but the samples seem closer to 7mhz
+            elif clock == 1:
+                mult = 72.0 / 14.0
             else:
+                print("unexpected clock", clock)
                 raise Exception()
                 
             trackdata = [min(1023, int((x & 0x7f) * mult)) for x in trackdata2]
@@ -1155,6 +1180,7 @@ def main():
             
             
     rawtracks = gather_rawtracks(args, target_tracks)
+    print("number of raw tracks to process", len(rawtracks))
     
     proc = Processor(args, target_tracks)
     

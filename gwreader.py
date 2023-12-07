@@ -208,6 +208,9 @@ def main(argv):
     parser.add_argument("--hd", action="store_true")
     parser.add_argument("--rpm360", action="store_true")
     parser.add_argument("--useht", action="store_true")
+    parser.add_argument("--showbad", action="store_true")
+    parser.add_argument("--indyfix", action="store_true")
+    parser.add_argument("--nw", help="don't write final .img file (useful for test runs of single sectors)", action="store_true")
     parser.add_argument("--selected")
     
     args = parser.parse_args()

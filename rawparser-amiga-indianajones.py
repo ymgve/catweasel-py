@@ -583,7 +583,7 @@ def parse_amiga_sector(bs, known_sectors=[]):
         words.append(rawres)
         csum ^= rawres
         total_missing += missing_syncs
-        
+
     csum &= 0x55555555
     if csum != 0:
         print("bad data crc", sectorno, hex(csum))
@@ -729,11 +729,14 @@ def tryfix(trackdata):
         n = trackdata[i] & 0x7f
         if n > 0x15 and n < 0x40:
             outdata.append(n + add)
+            # if add != 0:
+                # print(i, n, add)
             add = 0
         elif n <= 0x15:
+            #print(i, n)
             add = n
         elif n >= 0x40:
-            print(i, trackdata[i-4:i+4].hex())
+            #print(i, trackdata[i-4:i+4].hex())
             if 0x24 < (trackdata[i-1] & 0x7f) < 0x2c:
                 #00001 ==> 00101
                 outdata.append(0x2a) 
@@ -804,7 +807,7 @@ if __name__ == "__main__":
         # if trackno % 2 == 1:
             # continue
             
-        # if trackno != 152:
+        # if trackno != 1:
             # continue
 
         scan = Trackscan(trackoffset, trackno, clock, flags, trackdata)
@@ -844,6 +847,7 @@ if __name__ == "__main__":
                 else:
                     if data != None:
                         add_new_sector(known_sectors, scan.trackno, sectorno, data)
+                        #print("good data", scan.trackno, sectorno)
                         tag = "data"
                     else:
                         print("bad data", sectorno)

@@ -276,7 +276,7 @@ def getbytes(bs, count):
             return res, missync
             
         if byte == None:
-            return res, 0
+            return res, -1
             
         res.append(byte)
         
@@ -299,7 +299,7 @@ def getamigaword(bs):
         
     return rawres, missing_syncs
     
-def parse_amiga_sector(bs, debug=False):
+def parse_amiga_sector(bs, args, debug=False):
     words = []
     total_missing = 0
     csum = 0
@@ -378,12 +378,13 @@ def parse_amiga_sector(bs, debug=False):
                 
             return header, None
         
-        if missing_syncs != 0:
-            if debug:
-                print("bad sector data", i, trackno, sectorno, bs.index, bs.trackdata[bs.index-10:bs.index+10], rawres, missing_syncs)
-                open("_foo.txt", "a").write(repr(bs.trackdata) + "\n")
-                
-            return header, None
+        if not args.indyfix:
+            if missing_syncs != 0:
+                if debug:
+                    print("bad sector data", i, trackno, sectorno, bs.index, bs.trackdata[bs.index-10:bs.index+10], rawres, missing_syncs)
+                    open("_foo.txt", "a").write(repr(bs.trackdata) + "\n")
+                    
+                return header, None
 
         words.append(rawres)
         csum ^= rawres
@@ -404,11 +405,16 @@ def parse_amiga_sector(bs, debug=False):
     # if total_missing != 0:
         # print(data.hex())
         
+    # if debug:
+        # print("good data", trackno, sectorno)
+        
     return header, data
     
 # 1 data OK
 # -1 CRC error
-# -2 undersized/corrupted data
+# -2 undersized
+# -3 corrupted data
+# -4 not correct header byte
 
 def get_data(bs, sectorsize, want_sectordata=True):
     res, missyncs = getbytes(bs, 7)
@@ -427,13 +433,20 @@ def get_data(bs, sectorsize, want_sectordata=True):
                         return 1, res + res2[:-2]
                     else:
                         return -1, res + res2
-                else:
+                elif missyncs == -1:
                     return -2, res + res2
+                else:
+                    return -3, res + res2
                     
             else:
                 return 1, res
-                
-    return -2, res
+        else:
+            return -4, res
+            
+    elif missyncs == -1:
+        return -2, res
+    else:
+        return -3, res
     
     
 def find_dos_syncs_fast(trackdata2):
@@ -472,7 +485,6 @@ def find_amiga_syncs_fast(trackdata2):
     
 def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_skew=False):
     syncs = sorted(rawtrack.syncs)
-    
     # map out headers and candidate data
     for idx in range(len(syncs)-1):
         startpos = syncs[idx]+14
@@ -528,14 +540,15 @@ def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_sk
                     # else:
                         # print("distance between header and data %d for htrack %d sector %d" % (distance, htrackno, sectorno))
                         
-                        
-                    segment = rawtrack.trackdata[startpos2:]
+                    # ignore endpos, just get more than enough data
+                    segment = rawtrack.trackdata[startpos2:startpos2+4120]
                     if not use_skew:
                         bs = Bitstream(segment, lut)
                     else:
                         bs = Bitstream_skew(segment, lut)
 
                     res, data = get_data(bs, sectorsize, True)
+                    #print("res", res, len(data), repr(data))
                     if res == 1:
                         if data[0] != 0xfb:
                             raise Exception("WTF?!?!")
@@ -550,13 +563,12 @@ def quick_scan_dos(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_sk
                         if rawtrack.add_sector(sec):
                             new_sectors.append(sec)
                     else:
-                        # handle broken sector here, with logging or something
-                        # for i in range(1, len(data), 32):
-                            # print(data[i:i+32].hex())
-                        # print(" ")
-                        
-                        pass
-                        
+                        # ignore undersized data as it's probably at the end of a track read
+                        if res != -2 and args.showbad:
+                            print("bad sector at track %d sector %d" % (htrackno, sectorno))
+                            for i in range(1, len(data), 32):
+                                print(data[i:i+32].hex())
+                            print("")
 
 
 def quick_scan_amiga(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_skew=False):
@@ -570,13 +582,15 @@ def quick_scan_amiga(args, rawtrack, new_sectors, lut, quality, sourcefunc, use_
             continue
             
         segment = rawtrack.trackdata[startpos:endpos]
+        if args.indyfix:
+            segment = do_indyfix(segment)
             
         if not use_skew:
             bs = Bitstream(segment, lut)
         else:
             bs = Bitstream_skew(segment, lut)
 
-        header, data = parse_amiga_sector(bs)
+        header, data = parse_amiga_sector(bs, args)
         if header != None:
             htrackno, sectorno, until_end, sector_label = header
             if data != None:
@@ -826,6 +840,28 @@ class RawTrack:
                 
         return s
 
+def do_indyfix(trackdata):
+    trackdata2 = []
+    i = 0
+    add = 0
+    while i < len(trackdata):
+        n = trackdata[i]
+        if n <= 216:
+            add += n
+        else:
+            n = min(1023, n + add)
+            add = 0
+            
+            if n >= 658:
+                trackdata2.append(426)
+                trackdata2.append(288)
+            else:
+                trackdata2.append(n)
+            
+        i += 1
+        
+    return trackdata2
+    
 def gather_rawtracks_cw(args, f, target_tracks, rawtracks):
     while True:
         trackoffset = f.tell()
@@ -835,7 +871,19 @@ def gather_rawtracks_cw(args, f, target_tracks, rawtracks):
             
         trackmagic, trackno, clock, flags, tsize = struct.unpack("<BBBBI", trackheader)
         trackdata2 = f.read(tsize)
-        
+
+        if clock == 0:
+            mult = 72.0 / 7.0 # catweasel claims to sample at 14mhz but the samples seem closer to 7mhz
+        elif clock == 1:
+            mult = 72.0 / 14.0
+        else:
+            print("unexpected clock", clock)
+            raise Exception()
+            
+        mult_table = []
+        for i in range(0x100):
+            mult_table.append(min(1023, int((i & 0x7f) * mult)))
+            
         # comment data
         if trackmagic == 0:
             continue
@@ -844,16 +892,9 @@ def gather_rawtracks_cw(args, f, target_tracks, rawtracks):
             raise Exception()
 
         if trackno in target_tracks:
-            if clock == 0:
-                mult = 72.0 / 7.0 # catweasel claims to sample at 14mhz but the samples seem closer to 7mhz
-            elif clock == 1:
-                mult = 72.0 / 14.0
-            else:
-                print("unexpected clock", clock)
-                raise Exception()
+            #trackdata = [min(1023, int((x & 0x7f) * mult)) for x in trackdata2]
+            trackdata = [mult_table[x] for x in trackdata2]
                 
-            trackdata = [min(1023, int((x & 0x7f) * mult)) for x in trackdata2]
-            
             rt = RawTrack(args, args.filename, trackoffset, trackno, trackdata)
             rawtracks.append(rt)
 
@@ -1000,6 +1041,7 @@ class Processor:
                             raise Exception("picked multiple selected from conflicting sectors")
                             
                         pickedsector = known[seckey][0]
+                        sectorchoices[ts] = (pickedsector, votes)
                         print("picked sector based on given fingerprint")
                         
                     votedata.append((votes, quality, seckey, fingerprint))
@@ -1102,14 +1144,19 @@ class Processor:
                     if bpb_spt != 0 and (bpb_tot % bpb_spt) == 0:
                         print("    Total tracks according to BPB: %d" % (bpb_tot // bpb_spt,))
             
-        imgfilename = self.args.filename + ".img"
-        of2 = open(imgfilename, "wb")
-        of2.write(output)
-        of2.close()    
+        if not self.args.nw:
+            imgfilename = self.args.filename + ".img"
+            of2 = open(imgfilename, "wb")
+            of2.write(output)
+            of2.close()    
 
         print("    highest track with data", self.highest_track)
         print("    sector type stats", sectortypestats)
-        print("    sectors written to %s: %d good    %d bad" % (imgfilename, goodcount, badcount))
+        
+        if self.args.nw:
+            print("    sectors NOT written: %d good    %d bad" % (goodcount, badcount))
+        else:
+            print("    sectors written to %s: %d good    %d bad" % (imgfilename, goodcount, badcount))
         
         if len(badtracks) != 0:
             print("    incomplete tracks: ", ",".join(str(x) for x in sorted(badtracks)))
@@ -1158,6 +1205,9 @@ def main():
     parser.add_argument("--rpm360", action="store_true")
     parser.add_argument("--ignoreht", action="store_true")
     parser.add_argument("--useht", action="store_true")
+    parser.add_argument("--showbad", action="store_true")
+    parser.add_argument("--indyfix", action="store_true")
+    parser.add_argument("--nw", help="don't write final .img file (useful for test runs of single sectors)", action="store_true")
     parser.add_argument("--selected")
     
     args = parser.parse_args()
